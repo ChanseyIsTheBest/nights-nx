@@ -15,9 +15,10 @@ directly on the Switch's own graphics API, deko3d.
 
 ## How to install
 
-Use the [nights-nx installer](https://github.com/ChanseyIsTheBest/nights-nx-installer): a web page that takes your
-two packages, makes the game's shaders for the Switch from them in your browser (nothing is uploaded) and gives you
-a zip to extract to the root of your SD card. Start `switch/nights-nx/nights-nx.nro` from the Homebrew Menu with a
+Use the **[nights-nx installer](https://chanseyisthebest.github.io/nights-nx-installer/)**
+([its source](https://github.com/ChanseyIsTheBest/nights-nx-installer)): a web page that takes your two packages,
+makes the game's shaders for the Switch from them in your browser (nothing is uploaded) and gives you a zip to
+extract to the root of your SD card. Start `switch/nights-nx/nights-nx.nro` from the Homebrew Menu with a
 title takeover (hold R while starting a game).
 
 ## Settings
