@@ -1,0 +1,14 @@
+# nights-nx (from banjo-nx): the guest functions replaced by localized native copies (docs/enhancements.md, "Hot guest
+# functions as localized copies"). tools/localize_native.py writes app/generated/hot/ from this list after every
+# codegen (tools/post_codegen.py), and app/src/cpu/banjo_hot_guest.cpp includes the result: one hook, one key
+# (banjo_cpu_native_<function>, CPU group) and one guard per line.
+#
+#   <address or generated name> [off] [key=<cvar>] [closure=<lines>] <what it is, with the shares that chose it>
+#
+# Shares: self samples of the main thread, PC (pc_profile, Spring Valley, 2026-10-29) / emulator ARM (emu4, 2026-10-29).
+# Write no other function's address on a line: tools/direct_calls.py reads every address in app/src as a hooked one.
+824FBC50 key=banjo_cpu_native_memcpy every thread: the C runtime's memcpy as a hook of its own, the hand-written native in front (PC 8.9 %, emulator 22.3 %)
+824FBB50 key=banjo_cpu_native_memset every thread: the C runtime's memset as a hook of its own, the hand-written native in front
+822D9CB0 key=banjo_cpu_native_transform_point main thread: matrix-stack point transform, the hand-written native in front (emulator 4.0 %, rank 3)
+822D9DD8 key=banjo_cpu_native_transform_direction main thread: matrix-stack direction transform, the hand-written native in front (emulator 1.9 %, rank 6)
+823EAFD8 key=banjo_cpu_native_buffer_reset second game thread: float-buffer reset, the hand-written native in front (emulator 26 % of that thread, rank 1)

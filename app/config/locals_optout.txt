@@ -1,0 +1,1 @@
+# nights-nx: functions opted out of the loop / leaf locals (tools/locals_choice.py). Empty until measured for NiGHTS.

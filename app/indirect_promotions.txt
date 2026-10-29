@@ -1,0 +1,2 @@
+# nights-nx: indirect call sites promoted to guarded direct calls (tools/indirect_promotions.py from a PC census).
+# Empty until NiGHTS has a census (banjo-nx's list named N&B's sites).

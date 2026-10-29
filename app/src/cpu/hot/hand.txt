@@ -1,0 +1,16 @@
+# nights-nx (from banjo-nx): guest functions with a HAND-WRITTEN native (app/src/cpu/hot/banjo_hand_natives.h, namespace
+# banjo::hand::n_<id>). tools/localize_native.py puts each in front of the generated copy of its function wherever
+# that copy is used (docs/enhancements.md, "Hand-written natives").
+#
+#   <address or generated name> [id=<namespace suffix>] [exact=<registers>]
+#
+# exact: registers the original writes that the native leaves exactly as the original does (memcpy reloads r3 with
+# the value it came with). Every other register the original writes is scratch the native does not reproduce: the
+# guard skips it for every hook whose copy contains the native.
+
+# (banjo-nx's entries were N&B's addresses; NiGHTS's go here with their evidence.)
+824FBC50 exact=r3   # C runtime memcpy (tools/crt_signatures.py: Banjo's sub_82BB4510, the same instructions)
+824FBB50            # C runtime memset (Banjo's sub_82BB4A40, the same instructions)
+822D9CB0 exact=r3,r4,r6,r7,r8,r9,r10   # matrix-stack point transform with the divide by w (main thread)
+822D9DD8 exact=r3,r4,r6,r7,r8,r9,r10   # matrix-stack direction transform, 3x3 (main thread)
+823EAFD8 exact=r6,r7,r8,r9,r10,f13   # float-buffer reset (second game thread)

@@ -1,0 +1,2 @@
+# nights-nx: script interpreters whose jump tables become threaded computed gotos (tools/switch_goto.py).
+# One generated function name per line. Empty until a NiGHTS profile names one.

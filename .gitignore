@@ -1,0 +1,49 @@
+# Game-derived content: never commit
+assets/
+app/assets/
+app/generated/*
+!app/generated/rexglue.cmake
+app/out/
+out/
+*.xex
+*.iso
+logs/
+# Build/temp
+*.log
+__pycache__/
+
+# 2026-10-19 (the private GitHub upload): built and game-derived files outside out/ and app/out/
+# The NRO holds the recompiled game code; shader libraries, pipeline caches and lists, DKSH caches, shader microcode
+# dumps and the game file index are made from the game's data.
+*.nro
+*.nso
+*.nacp
+*.elf
+*.mesp
+*.mesp.idx
+*.dksh
+*.ucode
+*.rgba
+*.mp4
+*.zip
+dist/switch/banjo-nx/*.bin
+dist/switch/banjo-nx/cache/
+dist/switch/banjo-nx/newlogs*/
+dist/switch/banjo-nx/capturas/
+deko3d_shaders*.bin
+pipeline_list*.bin
+vfs_index*.bin
+# Other ports' SDK and shader-tool copies this project started from (not built by it)
+sdk_nfsmw/
+shaders_nfsmw/
+# 2026-10-20: tools/difftest's working files (a translated game shader: dp.frag/dp.dksh/dp.bin) and shtool's build output
+tools/difftest/dp.*
+tools/difftest/shtool/obj/
+tools/difftest/shtool/bin/
+# 2026-10-21: the PGO profile (.gcda files merged from an instrumented run; tools/pgo_merge.py, docs/pgo-lto.md)
+pgo/
+*.xexp
+
+# nights-nx: packages (the NRO, the ELF, the generated code derived from the game)
+dist/package/
+out/pgo_streams/

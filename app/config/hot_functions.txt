@@ -1,0 +1,1 @@
+# nights-nx: hot generated functions (tools/hot_layout.py). Empty until a NiGHTS profile.
