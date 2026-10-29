@@ -28,6 +28,8 @@ title takeover (hold R while starting a game).
 |---|---|---|
 | `language` | `"auto"` | the Switch's language; or english, japanese, french, german, spanish, italian |
 | `banjo_renut_smaa` | `true` | SMAA edge smoothing on the 3D (the HUD and text stay sharp) |
+| `nights_present_60` | `false` | 60 frames a second on the screen with the game at its own 30: in-between frames made from the game's (the camera, objects and characters move at 60; particles, sprites and the movies stay at 30); with it on, double buffering is off |
+| `nights_present_60_mode` | `0` | with `nights_present_60`: 0 = predict (the next half frame guessed, no added input lag), 1 = interpolate (halfway between two of the game's frames: nothing overshoots, 16.7 ms more input lag) |
 | `input_xbox_layout` | `true` | face buttons by position, as on an Xbox pad; `false` = by letter |
 | `input_joycon_sideways` | `true` | single Joy-Cons held sideways, one per player |
 | `input_joycon_sideways_stick` | `true` | the single Joy-Con's stick turned for the sideways grip |
