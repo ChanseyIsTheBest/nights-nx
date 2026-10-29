@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -16,9 +17,21 @@
 #include <rex/cvar.h>
 
 #include "renut_engine/gpu/backend/video.h"
+#include "renut_engine/gpu/banjo_renut_tuning.h"  // NextToExecutable (nights_diag_camera_frames)
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/render/surfaces.h"
 
+// nights-nx (2026-10-29, the user's report: "the camera updates at 25fps or something ... only sometimes"):
+// CameraDiag*, a record of the camera's registers frame by frame.
+REXCVAR_DEFINE_INT32(nights_diag_camera_frames, 0, "NiGHTS/Diagnostics",
+                     "Diagnostics: for this many frames, camera_diag.bin next to the executable gets, frame by frame, "
+                     "the vertex shader constants of the frame's most drawn vertex shader and which of them every draw "
+                     "of that shader shares (the camera's matrices and the like): per frame u32 frame, u32 shader, "
+                     "u32 draws, u32 0, u64 microseconds, u64 shared[4] (a bit a register), then the 256 registers "
+                     "(4 KB, the device's guest-order floats). 0 = off")
+    .range(0, 1000000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DECLARE(bool, nights_true60);  // nights_frame_hooks.cpp: the game's own 60 needs no extra frames
 REXCVAR_DEFINE_BOOL(nights_present_60, false, "NiGHTS",
                     "60 frames a second on the screen with the game at its own 30: after each game frame the render "
                     "thread draws it again with the vertex shader constants (camera, objects, bones) moved half a "
@@ -304,7 +317,7 @@ void ChangedChunks(const u8 *a, const u8 *b, uint64_t changed[2]) {
 }  // namespace
 
 bool On() {
-  static const bool on = REXCVAR_GET(nights_present_60);
+  static const bool on = REXCVAR_GET(nights_present_60) && !REXCVAR_GET(nights_true60);
   return on;
 }
 
@@ -336,6 +349,73 @@ void LogDraw(const u8 *device_state, const DrawCall &call, const u8 *vertices, u
           s.same[w] &= ~(uint64_t(1) << (r % 64));
       }
   }
+}
+
+// ---- nights_diag_camera_frames (render thread only).
+namespace {
+struct CameraShader {
+  u32 draws = 0;
+  uint64_t same[4] = {};
+  std::vector<u8> first;  // the first draw's registers
+};
+std::unordered_map<u32, CameraShader> g_camera_shaders;  // this frame's, by vertex shader address
+FILE *g_camera_file = nullptr;
+u32 g_camera_frames = 0, g_camera_frame = 0;
+}  // namespace
+
+bool CameraDiagOn() {
+  static const bool on = REXCVAR_GET(nights_diag_camera_frames) > 0;
+  return on && g_camera_frames < u32(REXCVAR_GET(nights_diag_camera_frames));
+}
+
+void CameraDiagDraw(const u8 *device_state) {
+  CameraShader &s = g_camera_shaders[Word(device_state, d3d::kDeviceOffsetVertexShader)];
+  const u8 *regs = device_state + kVertexConstants;
+  if (!s.draws++) {
+    s.first.assign(regs, regs + kVertexConstantBytes);
+    for (uint64_t &w : s.same)
+      w = ~uint64_t(0);
+    return;
+  }
+  for (u32 w = 0; w < 4; ++w)
+    for (uint64_t bits = s.same[w]; bits; bits &= bits - 1) {
+      const u32 r = w * 64 + u32(__builtin_ctzll(bits));
+      if (std::memcmp(s.first.data() + r * 16, regs + r * 16, 16) != 0)
+        s.same[w] &= ~(uint64_t(1) << (r % 64));
+    }
+}
+
+void CameraDiagEndFrame() {
+  ++g_camera_frame;
+  const CameraShader *best = nullptr;
+  u32 best_vs = 0;
+  for (const auto &[vs, s] : g_camera_shaders)
+    if (!best || s.draws > best->draws) {
+      best = &s;
+      best_vs = vs;
+    }
+  if (best && best->draws > 1) {
+    if (!g_camera_file) {
+      g_camera_file = std::fopen(banjo::renut_gpu::NextToExecutable("camera_diag.bin").string().c_str(), "wb");
+      RGPU_INFO("[camera] nights_diag_camera_frames: {} frames to camera_diag.bin{}",
+                REXCVAR_GET(nights_diag_camera_frames), g_camera_file ? "" : " (NOT opened)");
+    }
+    if (g_camera_file) {
+      const uint64_t us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch()).count());
+      const u32 head[4] = {g_camera_frame, best_vs, best->draws, 0};
+      std::fwrite(head, sizeof(head), 1, g_camera_file);
+      std::fwrite(&us, sizeof(us), 1, g_camera_file);
+      std::fwrite(best->same, sizeof(best->same), 1, g_camera_file);
+      std::fwrite(best->first.data(), 1, best->first.size(), g_camera_file);
+      if (++g_camera_frames >= u32(REXCVAR_GET(nights_diag_camera_frames))) {
+        std::fclose(g_camera_file);
+        g_camera_file = nullptr;
+        RGPU_INFO("[camera] camera_diag.bin: {} frames written", g_camera_frames);
+      }
+    }
+  }
+  g_camera_shaders.clear();
 }
 
 void LogClear(const u8 *device_state, u32 flags, const ClearRect *rect, const float color[4], float depth,

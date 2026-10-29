@@ -62,12 +62,13 @@ COMMON = {
     'banjo_system_core': '0',
     'banjo_forwarder_program_id': '""',
     'banjo_renut_ab_targets': '""',
-    # The 60 frames a second presentation (src/renut_engine/gpu/backend/frame_double.cpp): shelved by the user
-    # (2026-10-29: the in-between frames jitter in both modes), off.
-    'nights_present_60': 'false',
+    # 1.0.1 (the user): no interpolation (nights_present_60) and no old 30 fps order (nights_30fps_original) in any
+    # toml; both stay off as the NRO's defaults.
 }
 # The picture options (the user's decision), one config each in configs/: renut.toml with that change.
 CONFIGS = {
+    'renut_60fps.toml': ("60 frames a second of the game's own (one logic step a frame, the game's speed "
+                         "unchanged) instead of 30", {'nights_true60': 'true'}),
     'renut_exact.toml': ("the game's own picture (pixel-identical): 1280x720 in both modes, no SMAA",
                          {'banjo_renut_smaa': 'false', 'banjo_renut_render_height_docked': '720',
                           'banjo_renut_display_height_docked': '720'}),
@@ -81,8 +82,8 @@ CONFIGS = {
                                      'banjo_renut_render_height_docked': '864',
                                      'banjo_renut_dynamic_resolution': 'true'}),
 }
-# The player's renut.toml (app/nights_switch.toml): the user's list of 2026-10-29, and (their later request) the
-# 60 fps presentation's two modes, off.
+# The player's renut.toml (app/nights_switch.toml): the user's list of 2026-10-29, and (1.0.1, the user) nights_true60
+# off: the new 30 fps by default ("much much better camera framepacing"), the game's own 60 as the option.
 PLAYER = '''# NiGHTS into Dreams... (nights-nx) settings, read at start. Everything else is built into nights-nx.nro; a setting
 # written here (or a file of configs/ copied over this one) overrides the built-in one.
 
@@ -92,12 +93,9 @@ language = "auto"
 # SMAA edge smoothing on the 3D (the HUD and text stay sharp). false = the game's own edges.
 banjo_renut_smaa = true
 
-# 60 frames a second on the screen with the game at its own 30: in-between frames made from the game's (the camera,
-# objects and characters move at 60; particles, sprites and the movies stay at 30). Off by default.
-# nights_present_60_mode: 0 = predict (the next half frame guessed: no added input lag), 1 = interpolate (halfway
-# between two of the game's frames: nothing overshoots, 16.7 ms more input lag). With it on, double buffering is off.
-nights_present_60 = false
-nights_present_60_mode = 0
+# Frame rate. false = 30 (the game's two logic steps a frame, the camera paced evenly). true = 60 frames a second of
+# the game's own (one logic step a frame; the game's speed is unchanged).
+nights_true60 = false
 
 # Face buttons by position, as on an Xbox pad (bottom = A). false = by letter.
 input_xbox_layout = true

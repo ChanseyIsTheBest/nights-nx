@@ -53,6 +53,20 @@ REXCVAR_DEFINE_INT32(input_script_sticks, 0, "Input",
                      "input poll, both analog sticks of user 0 wander at random (a new direction every 1.5 s, eased "
                      "between them): the left stick moves the player, the right turns the camera. 0: off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// nights-nx (2026-10-29, the user: "go through the level ... and move diagonally"): a fixed stick course for test runs.
+REXCVAR_DEFINE_STRING(input_script_stick_cycle, "", "Input",
+                      "Test automation with input_script (nights-nx 2026-10-29): from input_script_stick_cycle_s "
+                      "seconds after the first input poll, the left stick held in these directions in turn (U D L R "
+                      "UL UR DL DR, comma separated), each for input_script_stick_hold_ms, over and over, instead of "
+                      "the random wander; the right stick centred. Empty: off")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(input_script_stick_cycle_s, 0, "Input",
+                     "input_script_stick_cycle: the second it starts at")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(input_script_stick_hold_ms, 2000, "Input",
+                     "input_script_stick_cycle: how long each direction is held (milliseconds)")
+    .range(100, 60000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(input_rumble, false, "Input",
                     "Controller vibration (off by default: controllers only get "
                     "zero vibration). true = the game's vibration");
@@ -278,6 +292,39 @@ double ScriptSeconds() {
 // banjo-nx (2026-10-23, input_script_sticks): the sticks' random wander: segment k of 1.5 s eases from target k to
 // target k + 1, each target four values in [-28000, 28000] from a hash of k.
 void ScriptedSticks(X_INPUT_GAMEPAD& pad) {
+  // nights-nx (2026-10-29, input_script_stick_cycle): the fixed course, from its second on.
+  static const std::vector<std::pair<int16_t, int16_t>> cycle = [] {
+    std::vector<std::pair<int16_t, int16_t>> out;
+    const std::string text = REXCVAR_GET(input_script_stick_cycle);
+    constexpr int16_t kFull = 28000, kDiagonal = 19800;  // a diagonal at the same deflection as a straight push
+    size_t at = 0;
+    while (at < text.size()) {
+      size_t end = text.find(',', at);
+      if (end == std::string::npos) end = text.size();
+      const std::string d = text.substr(at, end - at);
+      at = end + 1;
+      if (d == "U") out.push_back({0, kFull});
+      else if (d == "D") out.push_back({0, int16_t(-kFull)});
+      else if (d == "L") out.push_back({int16_t(-kFull), 0});
+      else if (d == "R") out.push_back({kFull, 0});
+      else if (d == "UL") out.push_back({int16_t(-kDiagonal), kDiagonal});
+      else if (d == "UR") out.push_back({kDiagonal, kDiagonal});
+      else if (d == "DL") out.push_back({int16_t(-kDiagonal), int16_t(-kDiagonal)});
+      else if (d == "DR") out.push_back({kDiagonal, int16_t(-kDiagonal)});
+    }
+    return out;
+  }();
+  if (!cycle.empty()) {
+    const double t = ScriptSeconds() - double(REXCVAR_GET(input_script_stick_cycle_s));
+    if (t >= 0.0) {
+      const auto [x, y] = cycle[size_t(t * 1000.0 / REXCVAR_GET(input_script_stick_hold_ms)) % cycle.size()];
+      pad.thumb_lx = x;
+      pad.thumb_ly = y;
+      pad.thumb_rx = 0;
+      pad.thumb_ry = 0;
+      return;
+    }
+  }
   static const int32_t from = REXCVAR_GET(input_script_sticks);
   if (from <= 0) return;
   const double t = ScriptSeconds() - double(from);
@@ -378,7 +425,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
       out_state->packet_number = packet;
       out_state->gamepad.buttons = buttons;
       ScriptedSticks(out_state->gamepad);  // banjo-nx (2026-10-23)
-      if (REXCVAR_GET(input_script_sticks) > 0)
+      if (REXCVAR_GET(input_script_sticks) > 0 || !REXCVAR_GET(input_script_stick_cycle).empty())
         out_state->packet_number = ++packet;  // the sticks change at every read
     }
     return X_ERROR_SUCCESS;

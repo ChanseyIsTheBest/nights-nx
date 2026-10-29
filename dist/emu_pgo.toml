@@ -464,7 +464,6 @@ nights_renut_swap_pacing = true
 nights_renut_smaa_before_ps = "82E6A43836DB5864"
 nights_renut_double_buffer = true
 nights_renut_queue_drain = true
-nights_present_60 = false
 input_script = "24:START,28:A,32:A,36:START,40:A,44:A,48:A,52:A,56:A,60:A,64:A,68:A,72:A,76:A,80:A,84:A,88:A"
 input_script_sticks = 75
 nfsmw_captura_cada_s = 60

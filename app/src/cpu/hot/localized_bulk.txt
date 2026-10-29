@@ -6,6 +6,7 @@
 # line is "<address> <what>".
 # nights-nx: the first 100 of that list (emulator run emu4, 2026-10-29: title, attract loop, Spring Valley gameplay;
 # at least 2 samples), the user's "top 100". The console decides: remake it from a console profile when one comes.
+# nights-nx (2026-10-29): 82138F60 (the task system, 4 console samples) left out: nights_true60 hooks it (src/nights_frame_hooks.cpp), and a bulk copy would own its name
 
 822DD9F8 561 console samples, 1302 instructions, 16 direct callees
 8233A590 140 console samples, 20 instructions, 1 direct callees
@@ -65,7 +66,6 @@
 825C3F20 4 console samples, 238 instructions, 1 direct callees
 825C1DA8 4 console samples, 176 instructions, 0 direct callees
 823DC340 4 console samples, 54 instructions, 0 direct callees
-82138F60 4 console samples, 58 instructions, 5 direct callees
 8258E348 4 console samples, 144 instructions, 6 direct callees
 82581A90 4 console samples, 184 instructions, 1 direct callees
 82585AF0 4 console samples, 94 instructions, 2 direct callees

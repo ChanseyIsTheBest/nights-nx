@@ -83,6 +83,7 @@
 // sa2-nx's sa2_renut_double_buffer and futari-nx's futari_renut_double_buffer). display_sync.cpp's
 // nights_renut_queue_drain keeps the display queue from staying one image deep with it.
 REXCVAR_DECLARE(bool, nights_present_60);  // backend/frame_double.cpp
+REXCVAR_DECLARE(bool, nights_true60);      // nights_frame_hooks.cpp: nights_present_60 does nothing with it
 REXCVAR_DEFINE_BOOL(nights_renut_double_buffer, true, "NiGHTS",
                     "Renut's renderer: a swapchain of 2 images instead of 3 (input latency: a finished frame is shown at "
                     "the next refresh instead of queueing behind one already waiting); a frame that misses its refresh "
@@ -943,7 +944,8 @@ bool Video::CreateHostDevice() {
   // whole one.
   // With nights_present_60 the swapchain keeps its three images (the user's 60 fps tests were made with them: the
   // extra frame's present must not wait for the image the display still shows).
-  static const bool double_buffer = REXCVAR_GET(nights_renut_double_buffer) && !REXCVAR_GET(nights_present_60);
+  static const bool double_buffer = REXCVAR_GET(nights_renut_double_buffer) &&
+                                    !(REXCVAR_GET(nights_present_60) && !REXCVAR_GET(nights_true60));
   const uint32_t images = double_buffer ? 2u : kFramesInFlight + 1;
   plume::RenderSwapChainDesc swap_desc(render_window, kSwapChainFormat, images, false, kFramesInFlight);
   RGPU_INFO("Swapchain: {} images{}", images,

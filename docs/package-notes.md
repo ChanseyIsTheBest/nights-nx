@@ -49,8 +49,9 @@ How the release settings work on NiGHTS:
   NiGHTS presents every other refresh, so an image counts as late only when it misses its second refresh (sa2-nx's
   60 fps version looks at the first). The log's `[display]` line ends with "double buffering: N new images not
   finished at their refresh, M queue drains in all".
-- **60 fps presentation**: shelved (your call, 2026-10-29: the in-between frames jittered in both modes);
-  `nights_present_60` stays false and its configs are gone.
+- **60 fps presentation**: in `renut.toml`, off (your call, 2026-10-29: both modes kept as options):
+  `nights_present_60 = true` turns it on, `nights_present_60_mode` 0 = predict, 1 = interpolate. With it on the
+  swapchain keeps three images and the queue drain is off (as in your 60 fps tests).
 
 ## What to test on the console
 

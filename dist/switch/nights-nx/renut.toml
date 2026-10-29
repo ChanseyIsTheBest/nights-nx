@@ -7,12 +7,9 @@ language = "auto"
 # SMAA edge smoothing on the 3D (the HUD and text stay sharp). false = the game's own edges.
 banjo_renut_smaa = true
 
-# 60 frames a second on the screen with the game at its own 30: in-between frames made from the game's (the camera,
-# objects and characters move at 60; particles, sprites and the movies stay at 30). Off by default.
-# nights_present_60_mode: 0 = predict (the next half frame guessed: no added input lag), 1 = interpolate (halfway
-# between two of the game's frames: nothing overshoots, 16.7 ms more input lag). With it on, double buffering is off.
-nights_present_60 = false
-nights_present_60_mode = 0
+# Frame rate. false = 30 (the game's two logic steps a frame, the camera paced evenly). true = 60 frames a second of
+# the game's own (one logic step a frame; the game's speed is unchanged).
+nights_true60 = false
 
 # Face buttons by position, as on an Xbox pad (bottom = A). false = by letter.
 input_xbox_layout = true

@@ -473,6 +473,8 @@ void QueueCapture(DrawCapture *capture) {
     if (frame_double::On())  // nights-nx (2026-10-29, nights_present_60): the frame's draws, for its extra frame
       frame_double::LogDraw(device, call, call.up_vertices, u32(capture->vertices.size()), call.up_indices,
                             u32(capture->indices.size()));
+    if (frame_double::CameraDiagOn())  // nights-nx (2026-10-29, nights_diag_camera_frames)
+      frame_double::CameraDiagDraw(device);
     if (capture->snapshot != SnapshotKind::Whole && ChainConstantsOn()) {
       // banjo-nx (from sa2-nx) (banjo_renut_snapshot_deltas_constants): every constant is the rebuilt device's (no running device).
       const ReplayConstants chain{nullptr, ~uint64_t(0), ~uint64_t(0), &g_chain_vs_dirty, &g_chain_ps_dirty,

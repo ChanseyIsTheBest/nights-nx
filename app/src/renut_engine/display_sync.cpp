@@ -56,6 +56,7 @@ REXCVAR_DEFINE_BOOL(nights_renut_queue_drain, true, "NiGHTS",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DECLARE(bool, nights_renut_double_buffer);  // gpu/backend/video.cpp
 REXCVAR_DECLARE(bool, nights_present_60);           // gpu/backend/frame_double.cpp: three images then (video.cpp)
+REXCVAR_DECLARE(bool, nights_true60);               // nights_frame_hooks.cpp: nights_present_60 does nothing with it
 
 #if REX_PLATFORM_SWITCH
 // banjo-nx (2026-10-20): libnx's default window (default_window.o: __nx_win_init, __nx_win_exit, nwindowGetDefault)
@@ -191,7 +192,7 @@ uint64_t g_late_images = 0, g_drains = 0;
 // not known. Double buffering only (with three images a late image does not hold the next one back).
 void QueueDrainAtRefresh(int ready, uint64_t now) {
   static const bool on = REXCVAR_GET(nights_renut_queue_drain) && REXCVAR_GET(nights_renut_double_buffer) &&
-                         !REXCVAR_GET(nights_present_60);
+                         !(REXCVAR_GET(nights_present_60) && !REXCVAR_GET(nights_true60));
   if (!on || ready < 0)
     return;
   if (ready == 0) {
@@ -516,7 +517,7 @@ std::string Report() {
       g_release_clamped.exchange(0, std::memory_order_relaxed));
   // nights-nx (2026-10-29): with double buffering, the queue drain's counts (nights_renut_queue_drain).
   static const bool drain_on = REXCVAR_GET(nights_renut_queue_drain) && REXCVAR_GET(nights_renut_double_buffer) &&
-                               !REXCVAR_GET(nights_present_60);
+                               !(REXCVAR_GET(nights_present_60) && !REXCVAR_GET(nights_true60));
   if (drain_on) {
     line += fmt::format("; double buffering: {} new images not finished at their refresh, {} queue drains in all, late "
                         "input margin +{:.2f} ms (nights_renut_queue_drain)",

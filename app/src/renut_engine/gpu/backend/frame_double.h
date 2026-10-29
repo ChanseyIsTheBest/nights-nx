@@ -71,4 +71,10 @@ void PresentIfDue(bool force = false);
 // The frame's log becomes the previous one; a new one starts.
 void EndFrame();
 
+// nights-nx (2026-10-29, nights_diag_camera_frames): the camera's registers frame by frame to camera_diag.bin; every
+// draw (backend/queued.cpp) and the frame's end (the swap's item), on the render thread.
+bool CameraDiagOn();
+void CameraDiagDraw(const u8 *device_state);
+void CameraDiagEndFrame();
+
 }  // namespace renut::gpu::frame_double

@@ -982,6 +982,8 @@ void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
                                                               : frame_double::Shift::kExact);
       frame_double::SchedulePresent(present_front);
     }
+    if (frame_double::CameraDiagOn())  // nights-nx (2026-10-29, nights_diag_camera_frames)
+      frame_double::CameraDiagEndFrame();
     if (frame_double::On()) {
       frame_double::EndFrame();
       std::lock_guard lock(State().mutex);

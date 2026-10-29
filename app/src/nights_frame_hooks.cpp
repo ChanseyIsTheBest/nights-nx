@@ -163,9 +163,57 @@ REXCVAR_DEFINE_INT32(nights_true60_interval, 0, "NiGHTS",
                      "to this value before the device is made (1 = 60 fps, 2 = the game's 30); 0 = as the game sets it")
     .range(0, 2)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// nights-nx (2026-10-29, the user's find: Colon-D's nights-60-fps mod for the PC version, the same code base): the
+// frame body sub_82138B08 runs the task system sub_82138F60 twice a displayed frame, two logic steps at 60 Hz (the word
+// at 0x841FED10 is 1 in the first pass, 0 in the second; 0x841FED0C is 0 during the second). The game's once-a-frame
+// work is gated to the first pass (sub_8229C1F8 and sub_821372C8 read the first word; nine readers of the second skip
+// their block in the second pass). nights_true60 skips the second pass and presents every refresh: one logic step a
+// displayed frame, 60 of them a second, the game's speed unchanged (the PC mod NOPs the second call the same way).
+// 1.0.1 (the user, after the console test): off by default, the new 30 fps below ("much much better camera
+// framepacing") the default and the game's own 60 the option.
+REXCVAR_DEFINE_BOOL(nights_true60, false, "NiGHTS",
+                    "60 frames a second of the game's own: one logic step a frame instead of two (the game steps its "
+                    "logic at 60 Hz and draws every other step), presented every refresh; the game's speed is "
+                    "unchanged. false = the game's 30 (two steps a frame), where nights_present_60 can add in-between "
+                    "frames")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// nights-nx (2026-10-29, the user: "make 30fps also use this new framepacer as well"): at 30 the frame keeps its two
+// logic steps (the game's speed), but the once-a-frame work runs with the second step, the one that is drawn, instead
+// of the first: the passes' words swapped for the two calls, so the picture shows one step whole.
+REXCVAR_DEFINE_BOOL(nights_30fps_original, false, "NiGHTS",
+                    "With nights_true60 = false: the game's own order, the once-a-frame work with the first of the "
+                    "frame's two logic steps (the drawn picture mixes the two). false = with the second, drawn step")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+namespace {
+void SetPassWords(uint8_t *base, uint32_t first, uint32_t during_second) {
+  const uint32_t a = __builtin_bswap32(first), b = __builtin_bswap32(during_second);
+  std::memcpy(base + 0x841FED10u, &a, 4);  // 1 in the first pass
+  std::memcpy(base + 0x841FED0Cu, &b, 4);  // 0 during the second
+}
+}  // namespace
+REX_EXTERN(__imp__sub_82138F60);
+REX_HOOK_RAW(sub_82138F60) {  // the task system: one pass of every task
+  static const bool true60 = REXCVAR_GET(nights_true60);
+  static const bool swap = !true60 && !REXCVAR_GET(nights_30fps_original);
+  uint32_t first_pass;
+  std::memcpy(&first_pass, base + 0x841FED10u, 4);
+  if (true60) {
+    if (!first_pass)
+      return;  // the second logic step of the frame: drawn as a frame of its own instead
+  } else if (swap) {
+    // The first step as the game's second (no once-a-frame work), the second as its first; the words the frame body
+    // set put back after each.
+    SetPassWords(base, first_pass ? 0 : 1, first_pass ? 0 : 1);
+    __imp__sub_82138F60(ctx, base);
+    SetPassWords(base, first_pass ? 1 : 0, first_pass ? 1 : 0);
+    return;
+  }
+  __imp__sub_82138F60(ctx, base);
+}
+
 REX_EXTERN(__imp__sub_825999B0);
 REX_HOOK_RAW(sub_825999B0) {  // the engine's device set-up
-  const int32_t forced = REXCVAR_GET(nights_true60_interval);
+  const int32_t forced = REXCVAR_GET(nights_true60) ? 1 : REXCVAR_GET(nights_true60_interval);
   uint32_t word;
   std::memcpy(&word, base + ctx.r4.u32 + 28, 4);
   word = __builtin_bswap32(word);
