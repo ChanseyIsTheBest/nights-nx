@@ -30,6 +30,7 @@ title takeover (hold R while starting a game).
 | `language` | `"auto"` | the Switch's language; or english, japanese, french, german, spanish, italian |
 | `banjo_renut_smaa` | `true` | SMAA edge smoothing on the 3D (the HUD and text stay sharp) |
 | `nights_true60` | `false` | the frame rate: `false` = 30, with the camera paced evenly (each displayed frame shows one whole logic step); `true` = 60 frames a second of the game's own, one logic step a frame, the game's speed unchanged |
+| `nights_true60_button_codes` | `true` | with `nights_true60 = true`: the game's button-sequence codes register at 60 fps; `false` = they do not |
 | `input_xbox_layout` | `true` | face buttons by position, as on an Xbox pad; `false` = by letter |
 | `input_joycon_sideways` | `true` | single Joy-Cons held sideways, one per player |
 | `input_joycon_sideways_stick` | `true` | the single Joy-Con's stick turned for the sideways grip |

@@ -271,6 +271,56 @@ REX_HOOK_RAW(sub_82138B08) {  // the frame body
   __imp__sub_82138B08(ctx, base);
 }
 
+// nights-nx (2026-11-04, the user: "the ground is invisible in sega saturn dreams only when playing with 60fps"): the
+// Saturn stages' ground lists (0x8423ABC0 and 0x8423EA50, filled by sub_822B5DA8 from a tile grid around the camera)
+// are emptied and rebuilt by sub_822B91A8, a task's update, only while the pass copy at +28 of the object sub_82137468
+// returns (held at 0x842447C0, written each pass by sub_821372C8) reads 0: the frame's second logic step, which
+// nights_true60 skips, so the lists stayed empty. With nights_true60 the copy reads 0 for this call alone: one rebuild
+// a displayed frame, as at 30, before the frame's draws. Inert at 30 fps.
+namespace {
+uint8_t *PassCopy(uint8_t *base) {
+  const uint32_t passes = GuestWord(base, 0x842447C0u);
+  return passes ? base + passes + 28 : nullptr;
+}
+}  // namespace
+REX_EXTERN(__imp__sub_822B91A8);
+REX_HOOK_RAW(sub_822B91A8) {
+  static const bool true60 = REXCVAR_GET(nights_true60);
+  uint8_t *const copy = true60 ? PassCopy(base) : nullptr;
+  if (!copy) {
+    __imp__sub_822B91A8(ctx, base);
+    return;
+  }
+  const uint8_t was = *copy;
+  *copy = 0;
+  __imp__sub_822B91A8(ctx, base);
+  *copy = was;
+}
+
+// nights-nx (2026-11-04, the user, 1.0.2; not tested): sub_8224F938 checks the game's button sequences (sub_821F0138,
+// over the history sub_821F0050 keeps, one slot a logic step) only while the same pass copy reads 0, so with
+// nights_true60 they never registered. The check looks at the newest slot and one before it, which at 30 fps covers
+// the frame's two steps: run every frame it would see a finished sequence twice, so with nights_true60 the copy reads 0
+// every other call, the game's own rate of checks. Inert at 30 fps.
+REXCVAR_DEFINE_BOOL(nights_true60_button_codes, true, "NiGHTS",
+                    "With nights_true60: the game's button-sequence codes register at 60 fps. false = they do not")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REX_EXTERN(__imp__sub_8224F938);
+REX_HOOK_RAW(sub_8224F938) {
+  static const bool on = REXCVAR_GET(nights_true60) && REXCVAR_GET(nights_true60_button_codes);
+  static bool check = false;
+  check = !check;
+  uint8_t *const copy = on && check ? PassCopy(base) : nullptr;
+  if (!copy) {
+    __imp__sub_8224F938(ctx, base);
+    return;
+  }
+  const uint8_t was = *copy;
+  *copy = 0;
+  __imp__sub_8224F938(ctx, base);
+  *copy = was;
+}
+
 REX_EXTERN(__imp__sub_82346560);
 REX_HOOK_RAW(sub_82346560) {  // D3DDevice_Swap
 #if BANJO_RENUT_RENDERER

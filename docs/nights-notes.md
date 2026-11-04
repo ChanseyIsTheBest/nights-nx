@@ -412,3 +412,35 @@ paired first). The console decides how slow it really is: Ryujinx's JIT on this 
     there, nearly every image would count as late and the drain would fire (one refresh of game time lost each time)
     every 5 s and on. Here an image is judged when found done, at its frame's last refresh (NextRelease's refresh count),
     or when a newer image comes first.
+
+## Sega Saturn Dreams: the ground at 60 fps (2026-11-04, the user's report)
+
+- **The report**: "the ground is invisible in sega saturn dreams only when playing with 60fps"; everything else fine.
+- **Reached in a test run**: Main Menu, DOWN, A (`input_script=30:START,36:A,42:START,60:DOWN,63:A,68:A,...`); the save in
+  `D:\nights\userdata` has it unlocked. Gameplay from about 95 s.
+- **Draw logs** (`banjo_renut_diag_draw_log_s=108`, Spring Valley; scenery shaders 2F97D38639CF6A10 / 6DDC2ECB177C6BCD, opaque):
+  30 fps 512 draws, `nights_true60` 116. The missing 396 are single quads (240 at the frame's start, 156 further on):
+  the game never issues them. Both logic steps kept with the 60 Hz interval (`nights_true60_interval=1`): 508, so the
+  cause is the skipped step, not the present rate.
+- **The cause**: `sub_822B91A8` (one direct caller, the task update `sub_821F1538`) empties the ground lists at
+  0x8423ABC0 and 0x8423EA50 and fills them through `sub_822B5DA8` (a tile grid around the camera, a sphere test per tile
+  and per quad, up to 1000 records a list) only in Saturn mode (word 0x827831B4 == 1) or when `-2328 word +88` == 9, and
+  only while the pass copy at +28 of the object `sub_82137468` returns reads 0. `sub_821372C8`, another task's update,
+  writes that copy from 0x841FED10 each pass. So: the second step only, which `nights_true60` skips.
+- **The fix**: `REX_HOOK_RAW(sub_822B91A8)` in `src/nights_frame_hooks.cpp`: with `nights_true60` the copy reads 0 for this
+  call alone. The lists are drawn by `sub_8229A898` / `sub_82297FD0`, later in the frame, so no frame of lag. Inert at 30.
+- **A new hook needs `tools/direct_calls.py --redo --gen app/generated`**. The first build of this fix changed nothing
+  (still 116 draws): the call site was `__imp__sub_822B91A8`, made direct when the function had no hook. The redo changed
+  that one line in `renut_recomp.66.cpp` (checked by comparing hashes of all the generated files). Not `post_codegen`:
+  run again on its own output it changes most files (the boot freeze above).
+- **Checked on the PC** (`runs/fixb60`, `runs/fixb30`): at 60, 447 scenery draws and the ground in the captures, at another
+  point of the level than the 30 fps log, so the counts are not comparable draw for draw; at 30, the same 581 draws
+  as before the fix. No access violations.
+- **The PC's frame rate says little**: the 60 fps run logged 23-37 fps in gameplay (42-60 before the fix, without the
+  ground), with the CPU at 100 % from another port's build and Ryujinx.
+- **The console (the user, 2026-11-04, the 1.0.2 NRO with `configs/renut_60fps.toml`)**: "works perfect". Released as 1.0.2.
+- **Same cause, 1.0.2 (the user: on by default, listed as an option, not tested)**: `sub_8224F938`'s button-sequence checks
+  (`sub_821F0138`) also run only while the copy reads 0, so they were unreachable with `nights_true60`.
+  `nights_true60_button_codes` (true, in renut.toml) lets the copy read 0 every other call. Not every call: the check
+  accepts the newest history slot or the one before, so it would fire twice on consecutive frames.
+- The Switch build keeps the PGO profile taken before this change (one generated line and this hook differ).

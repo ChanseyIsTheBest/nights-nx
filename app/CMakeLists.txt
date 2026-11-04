@@ -618,7 +618,7 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(renut
         NAME "NiGHTS into Dreams"  # no "&": cmd.exe would split the post-build command
         AUTHOR "ChanseyIsTheBest"
-        VERSION "1.0.1"
+        VERSION "1.0.2"
         ${RENUT_ICON_ARG})
 endif()
 

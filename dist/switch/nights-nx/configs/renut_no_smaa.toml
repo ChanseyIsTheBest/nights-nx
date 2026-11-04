@@ -12,6 +12,9 @@ banjo_renut_smaa = false
 # the game's own (one logic step a frame; the game's speed is unchanged).
 nights_true60 = false
 
+# With nights_true60 = true: the game's button-sequence codes register at 60 fps. false = they do not.
+nights_true60_button_codes = true
+
 # Face buttons by position, as on an Xbox pad (bottom = A). false = by letter.
 input_xbox_layout = true
 
