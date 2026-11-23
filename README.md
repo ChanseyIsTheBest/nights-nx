@@ -20,8 +20,9 @@ tree, with every universal fix and speed-up the other ports found, and NiGHTS's 
 - MSAA works on NiGHTS's render targets (2x / 4x from the menu).
 - Machine-optimised copies of every game function the console profile found running, and a release trained with
   profile-guided optimisation on the console.
-- Smaller install: the game's files packed (LZ4 / ZXC), the movies as H.265 on the Switch's video decoder and the music
-  as Opus (the installer does this).
+- Smaller install: the game goes from 2,041 MB to 647 MB (68 % smaller). The installer packs the game's files (LZ4 /
+  ZXC: 1,093 MB to 312 MB), turns the movies into H.265 for the Switch's video decoder (515 MB to 202 MB) and the music
+  into Opus (430 MB to 130 MB). The whole folder on the SD card, NRO and shaders included, is 711 MB.
 - No logging or profiling in the release (`log_level = "info"` in renut.toml turns the logs on for a bug report).
 
 > [!NOTE]
