@@ -8,12 +8,12 @@ It is not an emulator. The PowerPC code of the game's `default.xex` is staticall
 Direct3D-level renderer ([reNut](https://github.com/masterspike52/reNut) by masterspike52) directly on the Switch's
 own graphics API, deko3d.
 
-Since 1.1.0 the port is built on the ultimate base
+Since 1.0.3 the port is built on the ultimate base
 ([renut_nx_ultimate_base](https://github.com/ChanseyIsTheBest/renut_nx_ultimate_base), ports 1-254): the base's whole
 tree, with every universal fix and speed-up the other ports found, and NiGHTS's own layer on it
 (docs/ultimate-rebase-plan.md). The base's later ports come in with `tools/ult_port_sync.py` (docs/ultimate-sync.md).
 
-**What's new in 1.1.0**
+**What's new in 1.0.3**
 - On the ultimate base: its renderer, its fixes and its speed-ups.
 - 60 frames a second by default; 30 is the option (the game menu, or `nights_true60 = false`).
 - The game menu (hold A+B+X+Y+L+R): language, frame rate, resolutions, SMAA, MSAA, controls.

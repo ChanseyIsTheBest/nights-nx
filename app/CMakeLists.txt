@@ -1036,12 +1036,12 @@ if(REXGLUE_PLATFORM_SWITCH)
     if(EXISTS "${RENUT_ICON}")
         set(RENUT_ICON_ARG ICON "${RENUT_ICON}")
     endif()
-    # nights-nx: author ChanseyIsTheBest, the user's icon. 1.1.0 (2026-11-23): the first release on the ultimate base
-    # (1.0.2-ult until then).
+    # nights-nx: author ChanseyIsTheBest, the user's icon. 1.0.3 (2026-11-23, the user's number): the first release on the
+    # ultimate base (1.0.2-ult until then; built as 1.1.0 first, the released NRO's NACP version edited to 1.0.3).
     rexglue_switch_add_nro(renut
         NAME "${RENUT_GAME_NAME}"  # port 193: set once, above
         AUTHOR "ChanseyIsTheBest"
-        VERSION "1.1.0"
+        VERSION "1.0.3"
         ${RENUT_ICON_ARG})
 endif()
 

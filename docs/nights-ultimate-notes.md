@@ -11,7 +11,7 @@ NiGHTS's own records from 1.0.0 to 1.0.2 are [nights-notes.md](nights-notes.md) 
 |---|---|---|
 | Where | the branch `ultimate` in the worktree `D:\nights\nights-nx-ult`, from `master` (65ec444e); the base fetched as `refs/ultbase/ultimate` | the base's rebasing prompt; `master` is not changed |
 | The project's internal name | `renut`, as the base and 1.0.2 (generated `renut_recomp.N.cpp`, the `renut` targets) | the same in both |
-| The player's files | `switch/nights-nx/nights-nx.nro`, `renut.toml` beside it (1.0.2's names); NACP version 1.1.0 (the first release on the base, 2026-11-23; `1.0.2-ult` before) | a 1.0.2 install keeps working |
+| The player's files | `switch/nights-nx/nights-nx.nro`, `renut.toml` beside it (1.0.2's names); NACP version 1.0.3 (the first release on the base, 2026-11-23, the user's number; `1.0.2-ult` before; built as 1.1.0, then the released NRO's NACP display version edited to 1.0.3, two bytes, the build stamp b11364ddac kept) | a 1.0.2 install keeps working |
 | The game files | `app/assets`: a directory junction to `D:\nights\nights-nx\app\assets` (default.xex and the title update's default.xexp) | the prompt: a junction, never a copy |
 | The code generator | the base's own build (`D:\renut-ultimate\base\sdk\out\win-amd64\rexglue.exe`, 2026-11-21, built from the same sdk/src/codegen as this tree), run by hand (`tools/codegen.ps1`'s steps: REXGLUE_DUMP_IMAGE, `rexglue codegen renut_manifest.toml`) | D: had 8.8 GB free: no host SDK build of its own; PowerShell scripts are not run past the execution policy |
 | The renderer | Renut only (the base's), Vulkan on the PC, deko3d on the Switch | as 1.0.2 |
