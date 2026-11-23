@@ -6,16 +6,16 @@
 //
 //   - Shader objects. NoteShaderObject reads the container copy inside a D3D shader object (VS +0x368, PS +0x28)
 //     and its microcode pointer (VS +0x20, PS +0x18), and maps the microcode's address and content to the library
-//     entry. Banjo's draw-time shader load is sub_8222BF10 (r3 = device, r4 = dirty bits; the counterpart of Mass
-//     Effect's sub_8222F1C8): it reads the bound VS from device+12696 and the PS from device+12692 (Mass Effect:
+//     entry. Banjo's draw-time shader load is sub_821FAF10 (r3 = device, r4 = dirty bits; the counterpart of Mass
+//     Effect's sub_821FE318): it reads the bound VS from device+12696 and the PS from device+12692 (Mass Effect:
 //     +12416 / +12412), so the objects are noted there, before the original patches the VS for the declaration.
-//     Mass Effect also hooks the link/patch call (sub_8222F850, r3 = VS, r7 = PS); in Banjo, sub_8222BF10 calls
-//     0x82656EE0 with r3 = device instead, so the draw-time hook alone covers it.
+//     Mass Effect also hooks the link/patch call (sub_8222F850, r3 = VS, r7 = PS); in Banjo, sub_821FAF10 calls
+//     0x8263FA70 with r3 = device instead, so the draw-time hook alone covers it.
 //   - Draw records, a hint for pairing (NoteDrawCall: primitive type, then r5..r7 as D3D received them):
-//       D3DDevice_DrawVertices        0x8222C7A0 (dev, type, start, count)
-//       D3DDevice_DrawIndexedVertices 0x826567C8 (dev, type, base, start, count)
-//       D3DDevice_DrawVerticesUP      0x8222E520 (dev, type, count, data, stride)
-//   - The game frame counter (D3DDevice_Swap, 0x82287590), for the overlay and the hang watch.
+//       D3DDevice_DrawVertices        0x821FB880 (dev, type, start, count)
+//       D3DDevice_DrawIndexedVertices 0x8263F358 (dev, type, base, start, count)
+//       D3DDevice_DrawVerticesUP      0x821FD698 (dev, type, count, data, stride)
+//   - The game frame counter (D3DDevice_Swap, 0x822554F8), for the overlay and the hang watch.
 //   - banjo_direct_state (the direct renderer, step 1, from sa2-nx): each draw hook also hands the state packets the
 //     draw function writes to the ring as a host record (BeginDrawDirect before the original, EndDrawDirect right
 //     after it; r3 = the device: +48 the command buffer write pointer, +52/+56 the segment's limits).
@@ -78,103 +78,103 @@ constexpr uint32_t kDevicePixelShader = 12692;   // 0x3194
 }  // namespace
 
 // Draw-time shader load (FlushState's shader part, inlined into every Draw*).
-REX_EXTERN(__imp__sub_8222BF10);
-REX_HOOK_RAW(sub_8222BF10) {
-  BANJO_RENUT_YIELD(sub_8222BF10)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_821FAF10);
+REX_HOOK_RAW(sub_821FAF10) {
+  BANJO_RENUT_YIELD(sub_821FAF10)  // Renut's renderer chosen (banjo_renderer = "renut")
   const uint32_t device = ctx.r3.u32;
   if (device >= 0x40000000 && device < 0x7F000000) {
     me::native::NoteShaderObject(base, Load32(base, device + kDeviceVertexShader), true);
     me::native::NoteShaderObject(base, Load32(base, device + kDevicePixelShader), false);
   }
   if (banjo::d3d::CensusOn()) [[unlikely]] {
-    banjo::d3d::CensusEnter(0x8222BF10u, ctx.r3.u32, base);
-    __imp__sub_8222BF10(ctx, base);
+    banjo::d3d::CensusEnter(0x821FAF10u, ctx.r3.u32, base);
+    __imp__sub_821FAF10(ctx, base);
     banjo::d3d::CensusLeave(base);
     return;
   }
-  __imp__sub_8222BF10(ctx, base);
+  __imp__sub_821FAF10(ctx, base);
 }
 
-REX_EXTERN(__imp__sub_8222C7A0);
-REX_HOOK_RAW(sub_8222C7A0) {  // D3DDevice_DrawVertices
-  BANJO_RENUT_YIELD_SHARED(sub_8222C7A0)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_821FB880);
+REX_HOOK_RAW(sub_821FB880) {  // D3DDevice_DrawVertices
+  BANJO_RENUT_YIELD_SHARED(sub_821FB880)  // Renut's renderer chosen (banjo_renderer = "renut")
   if (banjo::d3d::CensusOn()) [[unlikely]] {  // banjo_diag_d3d_census: counted, the original unchanged
     banjo::d3d::NoteDraw(base, ctx.r3.u32, 1, ctx.r6.u32);
-    banjo::d3d::CensusEnter(0x8222C7A0u, ctx.r3.u32, base);
-    __imp__sub_8222C7A0(ctx, base);
+    banjo::d3d::CensusEnter(0x821FB880u, ctx.r3.u32, base);
+    __imp__sub_821FB880(ctx, base);
     banjo::d3d::CensusLeave(base);
     return;
   }
   uint32_t& depth = ctx.host_counters[me::native::kRecordDepthSlot];
-  auto direct = me::native::BeginDrawDirect(base, ctx.r3.u32, depth, 0x8222C7A0u);
+  auto direct = me::native::BeginDrawDirect(base, ctx.r3.u32, depth, 0x821FB880u);
   me::native::NoteDrawCall(base, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32);
   // banjo_d3d_native_draw_vertices; banjo_d3d_records_native: the record's operations written as the packets are
   if (!banjo::d3d::NativeDraw<false>(ctx, base, direct.ops.begin ? &direct.ops : nullptr)) {
     direct.ops.cur = nullptr;
-    __imp__sub_8222C7A0(ctx, base);
+    __imp__sub_821FB880(ctx, base);
   }
   me::native::EndDrawDirect(base, direct, depth);
 }
 
-REX_EXTERN(__imp__sub_826567C8);
-REX_HOOK_RAW(sub_826567C8) {  // D3DDevice_DrawIndexedVertices
-  BANJO_RENUT_YIELD_SHARED(sub_826567C8)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_8263F358);
+REX_HOOK_RAW(sub_8263F358) {  // D3DDevice_DrawIndexedVertices
+  BANJO_RENUT_YIELD_SHARED(sub_8263F358)  // Renut's renderer chosen (banjo_renderer = "renut")
   if (banjo::d3d::CensusOn()) [[unlikely]] {  // banjo_diag_d3d_census: counted, the original unchanged
     banjo::d3d::NoteDraw(base, ctx.r3.u32, 0, ctx.r7.u32);
-    banjo::d3d::CensusEnter(0x826567C8u, ctx.r3.u32, base);
-    __imp__sub_826567C8(ctx, base);
+    banjo::d3d::CensusEnter(0x8263F358u, ctx.r3.u32, base);
+    __imp__sub_8263F358(ctx, base);
     banjo::d3d::CensusLeave(base);
     return;
   }
   uint32_t& depth = ctx.host_counters[me::native::kRecordDepthSlot];
-  auto direct = me::native::BeginDrawDirect(base, ctx.r3.u32, depth, 0x826567C8u);
+  auto direct = me::native::BeginDrawDirect(base, ctx.r3.u32, depth, 0x8263F358u);
   me::native::NoteDrawCall(base, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32);
   // banjo_d3d_native_draw_indexed; banjo_d3d_records_native: the record's operations written as the packets are
   if (!banjo::d3d::NativeDraw<true>(ctx, base, direct.ops.begin ? &direct.ops : nullptr)) {
     direct.ops.cur = nullptr;
-    __imp__sub_826567C8(ctx, base);
+    __imp__sub_8263F358(ctx, base);
   }
   me::native::EndDrawDirect(base, direct, depth);
 }
 
-REX_EXTERN(__imp__sub_8222E520);
-REX_HOOK_RAW(sub_8222E520) {  // D3DDevice_DrawVerticesUP
-  BANJO_RENUT_YIELD_SHARED(sub_8222E520)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_821FD698);
+REX_HOOK_RAW(sub_821FD698) {  // D3DDevice_DrawVerticesUP
+  BANJO_RENUT_YIELD_SHARED(sub_821FD698)  // Renut's renderer chosen (banjo_renderer = "renut")
   if (banjo::d3d::CensusOn()) [[unlikely]] {  // banjo_diag_d3d_census: counted, the original unchanged
     banjo::d3d::NoteDraw(base, ctx.r3.u32, 2, ctx.r5.u32);
-    banjo::d3d::CensusEnter(0x8222E520u, ctx.r3.u32, base);
-    __imp__sub_8222E520(ctx, base);
+    banjo::d3d::CensusEnter(0x821FD698u, ctx.r3.u32, base);
+    __imp__sub_821FD698(ctx, base);
     banjo::d3d::CensusLeave(base);
     return;
   }
   uint32_t& depth = ctx.host_counters[me::native::kRecordDepthSlot];
-  auto direct = me::native::BeginDrawDirect(base, ctx.r3.u32, depth, 0x8222E520u);
+  auto direct = me::native::BeginDrawDirect(base, ctx.r3.u32, depth, 0x821FD698u);
   direct.ops = {};  // (no native path: its records are decoded)
   me::native::NoteDrawCall(base, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32);
-  __imp__sub_8222E520(ctx, base);
+  __imp__sub_821FD698(ctx, base);
   me::native::EndDrawDirect(base, direct, depth);
 }
 
-// Direct3D's one-rectangle clear (its only caller is D3DDevice_Clear's per-rectangle step sub_822811A0): markers before
+// Direct3D's one-rectangle clear (its only caller is D3DDevice_Clear's per-rectangle step sub_8224F110): markers before
 // and after its packets for the renderer (banjo_d3d_api_clear, me/banjo_d3d_clear.h).
-REX_EXTERN(__imp__sub_82223560);
-REX_HOOK_RAW(sub_82223560) {
-  BANJO_RENUT_YIELD(sub_82223560)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_821F2750);
+REX_HOOK_RAW(sub_821F2750) {
+  BANJO_RENUT_YIELD(sub_821F2750)  // Renut's renderer chosen (banjo_renderer = "renut")
   const uint32_t device = ctx.r3.u32;
   const bool marked = banjo::d3d::clear::Begin(ctx, base);
-  __imp__sub_82223560(ctx, base);
+  __imp__sub_821F2750(ctx, base);
   if (marked) banjo::d3d::clear::End(device, base);
 }
 
 // D3DDevice_Resolve: markers before and after its packets (banjo_d3d_api_resolve, me/banjo_d3d_clear.h).
-REX_EXTERN(__imp__sub_8222D6C8);
-REX_HOOK_RAW(sub_8222D6C8) {
-  BANJO_RENUT_YIELD_SHARED(sub_8222D6C8)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_821FC7A0);
+REX_HOOK_RAW(sub_821FC7A0) {
+  BANJO_RENUT_YIELD_SHARED(sub_821FC7A0)  // Renut's renderer chosen (banjo_renderer = "renut")
   const uint32_t device = ctx.r3.u32;
   uint32_t& depth = ctx.host_counters[me::native::kRecordDepthSlot];
-  const auto record = me::native::BeginWriterDirect(base, device, depth, 0x8222D6C8u);  // banjo_d3d_records
+  const auto record = me::native::BeginWriterDirect(base, device, depth, 0x821FC7A0u);  // banjo_d3d_records
   const bool marked = banjo::d3d::clear::ResolveBegin(ctx, base);
-  __imp__sub_8222D6C8(ctx, base);
+  __imp__sub_821FC7A0(ctx, base);
   if (marked) banjo::d3d::clear::ResolveEnd(device, base);
   me::native::EndDrawDirect(base, record, depth);
 }
@@ -182,31 +182,31 @@ REX_HOOK_RAW(sub_8222D6C8) {
 // D3DVertexBuffer_Lock / D3DIndexBuffer_Lock (r3 = the buffer): the buffer's pages are noted with a new Lock sequence
 // number before the game gets the pointer (me/banjo_d3d_locks.h). The whole buffer from its header (+24 the address,
 // +28 its size word), whatever part is locked: a superset.
-REX_EXTERN(__imp__sub_82654E80);
-REX_HOOK_RAW(sub_82654E80) {  // D3DVertexBuffer_Lock
-  BANJO_RENUT_YIELD_SHARED(sub_82654E80)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_8263D5E8);
+REX_HOOK_RAW(sub_8263D5E8) {  // D3DVertexBuffer_Lock
+  BANJO_RENUT_YIELD_SHARED(sub_8263D5E8)  // Renut's renderer chosen (banjo_renderer = "renut")
   const uint32_t vb = ctx.r3.u32;
   if (vb >= 0x10000u && vb < 0xFFFFFF00u) {
     const uint8_t* h = base + vb + (vb >= 0xE0000000u ? ::banjo::hot::PhysOff(vb) : 0u);
     banjo::d3d::locks::Mark(Load32(h, 24) & ~3u, Load32(h, 28) & 0x03FFFFFCu);
   }
-  __imp__sub_82654E80(ctx, base);
+  __imp__sub_8263D5E8(ctx, base);
 }
-REX_EXTERN(__imp__sub_82654F90);
-REX_HOOK_RAW(sub_82654F90) {  // D3DIndexBuffer_Lock
-  BANJO_RENUT_YIELD_SHARED(sub_82654F90)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_8263D6F8);
+REX_HOOK_RAW(sub_8263D6F8) {  // D3DIndexBuffer_Lock
+  BANJO_RENUT_YIELD_SHARED(sub_8263D6F8)  // Renut's renderer chosen (banjo_renderer = "renut")
   const uint32_t ib = ctx.r3.u32;
   if (ib >= 0x10000u && ib < 0xFFFFFF00u) {
     const uint8_t* h = base + ib + (ib >= 0xE0000000u ? ::banjo::hot::PhysOff(ib) : 0u);
     banjo::d3d::locks::Mark(Load32(h, 24), std::min<uint32_t>(Load32(h, 28) & 0x03FFFFFFu, 64u << 20));
   }
-  __imp__sub_82654F90(ctx, base);
+  __imp__sub_8263D6F8(ctx, base);
 }
 
-REX_EXTERN(__imp__sub_82287590);
-REX_HOOK_RAW(sub_82287590) {  // D3DDevice_Swap
+REX_EXTERN(__imp__sub_822554F8);
+REX_HOOK_RAW(sub_822554F8) {  // D3DDevice_Swap
   if (::banjo::renut_gpu::Active()) {  // Renut's renderer chosen (banjo_renderer = "renut")
-    renut_native_sub_82287590(ctx, base);
+    renut_native_sub_822554F8(ctx, base);
     g_banjo_game_frames.fetch_add(1, std::memory_order_relaxed);  // the captures' video and the frame rate
     static auto last_report = std::chrono::steady_clock::now();
     const auto now = std::chrono::steady_clock::now();
@@ -217,16 +217,16 @@ REX_HOOK_RAW(sub_82287590) {  // D3DDevice_Swap
     return;
   }
   if (banjo::d3d::CensusOn()) [[unlikely]] {
-    banjo::d3d::CensusEnter(0x82287590u, ctx.r3.u32, base);
-    __imp__sub_82287590(ctx, base);
+    banjo::d3d::CensusEnter(0x822554F8u, ctx.r3.u32, base);
+    __imp__sub_822554F8(ctx, base);
     banjo::d3d::CensusLeave(base);
     g_banjo_game_frames.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   me::native::NoteMainDevice(ctx.r3.u32);  // banjo_d3d_records: the writers' device when their r3 is not one
   uint32_t& depth = ctx.host_counters[me::native::kRecordDepthSlot];
-  const auto record = me::native::BeginWriterDirect(base, ctx.r3.u32, depth, 0x82287590u);
-  __imp__sub_82287590(ctx, base);
+  const auto record = me::native::BeginWriterDirect(base, ctx.r3.u32, depth, 0x822554F8u);
+  __imp__sub_822554F8(ctx, base);
   me::native::EndDrawDirect(base, record, depth);
   g_banjo_game_frames.fetch_add(1, std::memory_order_relaxed);
   // The native draw path's counters, every 10 s (one clock read per Swap).
@@ -240,33 +240,33 @@ REX_HOOK_RAW(sub_82287590) {  // D3DDevice_Swap
   }
 }
 
-// banjo_d3d_records: Direct3D's space function (the kick and the next segment; its "more space" sub_821E2940 calls it),
+// banjo_d3d_records: Direct3D's space function (the kick and the next segment; its "more space" sub_821B28B0 calls it),
 // which gives a call that runs out of room a new segment: the call's records are then made of what it writes there.
-REX_EXTERN(__imp__sub_82210AB0);
-REX_HOOK_RAW(sub_82210AB0) {
-  BANJO_RENUT_YIELD_SHARED(sub_82210AB0)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_821DFFF0);
+REX_HOOK_RAW(sub_821DFFF0) {
+  BANJO_RENUT_YIELD_SHARED(sub_821DFFF0)  // Renut's renderer chosen (banjo_renderer = "renut")
   const uint32_t device = ctx.r3.u32;
   const uint32_t old_end = device >= 0x40000000u && device < 0x7F000000u ? Load32(base, device + 48) : 0;
-  __imp__sub_82210AB0(ctx, base);
+  __imp__sub_821DFFF0(ctx, base);
   me::native::NoteSegmentSwitch(base, device, ctx.host_counters[me::native::kRecordDepthSlot], old_end);
 }
 
 // Direct3D's kick (one indirect buffer per segment into the primary ring, then the write pointer): banjo_d3d_host_submit
 // (step 6 of docs/d3d-full-replacement.md) hands the segments to the decoder through a host queue.
-REX_EXTERN(__imp__sub_82210408);
-REX_HOOK_RAW(sub_82210408) {
-  BANJO_RENUT_YIELD(sub_82210408)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_821DF948);
+REX_HOOK_RAW(sub_821DF948) {
+  BANJO_RENUT_YIELD(sub_821DF948)  // Renut's renderer chosen (banjo_renderer = "renut")
   const bool noted = me::native::KickBegin(base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32);
-  __imp__sub_82210408(ctx, base);
+  __imp__sub_821DF948(ctx, base);
   if (noted) me::native::KickEnd();
 }
 // Direct3D's copy of packets of its own into the primary ring (the next segment's tile select), which the next kick
 // submits: queued as operations too.
-REX_EXTERN(__imp__sub_826571D8);
-REX_HOOK_RAW(sub_826571D8) {
-  BANJO_RENUT_YIELD(sub_826571D8)  // Renut's renderer chosen (banjo_renderer = "renut")
+REX_EXTERN(__imp__sub_8263FD60);
+REX_HOOK_RAW(sub_8263FD60) {
+  BANJO_RENUT_YIELD(sub_8263FD60)  // Renut's renderer chosen (banjo_renderer = "renut")
   me::native::RingWords(base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32);
-  __imp__sub_826571D8(ctx, base);
+  __imp__sub_8263FD60(ctx, base);
 }
 
 // banjo_d3d_records: the hooks on Direct3D's other command-buffer writers (tools/d3d/d3d_record_hooks.py writes the

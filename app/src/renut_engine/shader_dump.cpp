@@ -2,7 +2,7 @@
 // Guest shader dumping.
 //
 // Captures the D3D9 shader blobs the XEX hands to D3DDevice_CreateVertexShader
-// (0x8264E8B0) and D3DDevice_CreatePixelShader (0x8264E6A8). D3D9 is statically
+// (0x826377C0) and D3DDevice_CreatePixelShader (0x826375D8). D3D9 is statically
 // linked into the XEX, so despite the rex_ names in renut_gpu_funcs.toml these
 // are ordinary recompiled guest functions and a midasm hook fires normally.
 // Both hooks sit on the function's first instruction (`mflr r12`), so r3 still
@@ -147,13 +147,13 @@ void dumpShaderBlob(PPCRegister& r3, const char* tag)
 
 }  // namespace
 
-// D3DDevice_CreateVertexShader @ 0x8264E8B0 -- r3 = pFunction at entry.
+// D3DDevice_CreateVertexShader @ 0x826377C0 -- r3 = pFunction at entry.
 void dumpVertexShader_hook(PPCRegister& r3)
 {
 	dumpShaderBlob(r3, "vs");
 }
 
-// D3DDevice_CreatePixelShader @ 0x8264E6A8 -- r3 = pFunction at entry.
+// D3DDevice_CreatePixelShader @ 0x826375D8 -- r3 = pFunction at entry.
 void dumpPixelShader_hook(PPCRegister& r3)
 {
 	dumpShaderBlob(r3, "ps");

@@ -43,4 +43,4 @@ ppc_u32_result_t Sleep_hook(ppc_u32_t ms) {
 
     return 0;
 }
-PPC_HOOK(sub_82715B60, Sleep_hook);
+PPC_HOOK(sub_826F1AB8, Sleep_hook);

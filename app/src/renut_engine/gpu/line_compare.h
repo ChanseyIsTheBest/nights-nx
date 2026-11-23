@@ -54,11 +54,19 @@ inline uint32_t Lines64DifferMask(const uint8_t *a, const uint8_t *b, uint32_t c
     return vreinterpretq_u32_u8(vorrq_u8(vorrq_u8(veorq_u8(p.val[0], q.val[0]), veorq_u8(p.val[1], q.val[1])),
                                          vorrq_u8(veorq_u8(p.val[2], q.val[2]), veorq_u8(p.val[3], q.val[3]))));
   };
-  for (; i + 4 <= count; i += 4) {
-    const uint32x4_t l0 = line(a + i * 64, b + i * 64), l1 = line(a + i * 64 + 64, b + i * 64 + 64);
-    const uint32x4_t l2 = line(a + i * 64 + 128, b + i * 64 + 128), l3 = line(a + i * 64 + 192, b + i * 64 + 192);
-    const uint32x4_t m = vpmaxq_u32(vpmaxq_u32(l0, l1), vpmaxq_u32(l2, l3));  // lane k: line i + k's maximum
-    mask |= vaddvq_u32(vandq_u32(vtstq_u32(m, m), bits)) << i;
+  const auto group = [&](uint32_t g) {  // lines g..g+3's bits, at bit g
+    const uint32x4_t l0 = line(a + g * 64, b + g * 64), l1 = line(a + g * 64 + 64, b + g * 64 + 64);
+    const uint32x4_t l2 = line(a + g * 64 + 128, b + g * 64 + 128), l3 = line(a + g * 64 + 192, b + g * 64 + 192);
+    const uint32x4_t m = vpmaxq_u32(vpmaxq_u32(l0, l1), vpmaxq_u32(l2, l3));  // lane k: line g + k's maximum
+    return vaddvq_u32(vandq_u32(vtstq_u32(m, m), bits)) << g;
+  };
+  for (; i + 4 <= count; i += 4)
+    mask |= group(i);
+  // bangaio-nx (2026-10-29): 1-3 lines left of four or more: the last four lines again (the overlap's bits are the
+  // same), not a reduction and a branch per line.
+  if (i < count && count >= 4) {
+    mask |= group(count - 4);
+    i = count;
   }
   for (; i < count; ++i)
     mask |= uint32_t(Line64Differs(a + i * 64, b + i * 64, true)) << i;

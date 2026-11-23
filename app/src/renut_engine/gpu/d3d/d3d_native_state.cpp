@@ -9,6 +9,7 @@
  * packets, which N&B's D3D writes into the ring, are left out.
  */
 #include "renut_engine/gpu/d3d/d3d_native.h"
+#include "renut_engine/gpu/host_batch.h"  // blur-nx (2026-11-18, the Renut host batch: the census's #35)
 
 #include <algorithm>
 #include <array>
@@ -741,11 +742,15 @@ u32 TableWord(u32 table, u32 index, u32 field) {
 // ---------------------------------------------------------------------------
 
 void SetRenderState(Device device, u32 state, u32 value) {
+  if (::renut::gpu::host_batch::CensusOn())  // blur-nx (2026-11-18, the census's #35)
+    ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kSetterCalls);
   if (device && state < kRenderStates)
     kRenderStateFns[state](device, value);
 }
 
 void SetSamplerState(Device device, u32 sampler, u32 state, u32 value) {
+  if (::renut::gpu::host_batch::CensusOn())  // blur-nx (2026-11-18, the census's #35)
+    ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kSetterCalls);
   if (device && sampler < kTextureSamplers && state < kSamplerStates)
     kSamplerStateFns[state](device, sampler, value);
 }
@@ -1078,6 +1083,8 @@ void SetScissorRect(Device device, i32 left, i32 top, i32 right, i32 bottom) {
 // the PA_CL_VPORT values; nothing without a target or depth surface.
 void SetViewport(Device device, float x, float y, float width, float height, float min_z,
                  float max_z) {
+  if (::renut::gpu::host_batch::CensusOn())  // blur-nx (2026-11-18, the census's #35)
+    ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kSetterCalls);
   if (!device)
     return;
   const u32 target = device.W(off::RenderTargets);

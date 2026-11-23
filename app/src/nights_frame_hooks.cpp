@@ -1,8 +1,9 @@
 // nights-nx (2026-10-29): NiGHTS's frame hook on D3DDevice_Swap (sub_82346560: XDK 21173, paired with Peggle 2's
 // sub_8261FE50 and Zuma's Revenge's sub_82309410, docs/nights-notes.md).
 //
-// - Counts game frames (g_banjo_game_frames: the captures' video and frame-rate lines read it; banjo-nx counted them in
-//   its N&B-only ring renderer hooks, not built here).
+// - Without Renut, counts game frames (g_banjo_game_frames: the captures' video and frame-rate lines read it). With
+//   Renut the base's own Swap hook counts them (renut-ultimate: d3d/hooks/device.cpp D3DDevice_Swap_hook, which
+//   Renut's Present ends in too), so a frame is counted once (nights-nx 1.0.2 counted it here).
 // - With Renut's renderer, Renut's Swap presents (renut_native_sub_82346560, BANJO_RENUT_HOOK_SHARED in
 //   renut_engine/gpu/d3d/hooks/device.cpp) and the frame is paced here (from peggle2-nx's PaceRenutSwap): Renut presents
 //   without the console's vertical blank and its Swap does not wait for one, and NiGHTS's game speed follows its frame
@@ -34,17 +35,9 @@
 #include "renut_engine/gpu/banjo_shared_hooks.h"
 #endif
 
-std::atomic<uint64_t> g_banjo_game_frames{0};
-
-// banjo-nx's controls overlay persists rebinds through its N&B cvar menu (renut_engine/cvar_menu.cpp, N&B-only, not
-// built): here the rebinds last for the session.
-void RenutSaveConfig() {
-  static bool logged = false;
-  if (!logged) {
-    logged = true;
-    REXLOG_INFO("[nights] controls: rebinds are kept for this session only (no cvar menu in this build)");
-  }
-}
+// nights-nx (on the base, 2026-11-22): the frame counter and RenutSaveConfig are src/nights_keys.cpp's (the base's
+// keys file, Katamari's before).
+extern std::atomic<uint64_t> g_banjo_game_frames;
 
 #if BANJO_RENUT_RENDERER
 REXCVAR_DEFINE_BOOL(nights_renut_swap_pacing, true, "NiGHTS",
@@ -146,9 +139,8 @@ uint32_t PresentInterval(const uint8_t *base, uint32_t device) {
   }
   return interval;
 }
-// After Renut presented a frame (from Swap or Present): count it and pace it.
+// After Renut presented a frame (from Swap or Present): pace it (Renut's Swap hook counted it).
 void AfterRenutPresent(uint32_t interval) {
-  g_banjo_game_frames.fetch_add(1, std::memory_order_relaxed);
   PaceRenutSwap(interval);
 }
 }  // namespace
@@ -171,11 +163,12 @@ REXCVAR_DEFINE_INT32(nights_true60_interval, 0, "NiGHTS",
 // displayed frame, 60 of them a second, the game's speed unchanged (the PC mod NOPs the second call the same way).
 // 1.0.1 (the user, after the console test): off by default, the new 30 fps below ("much much better camera
 // framepacing") the default and the game's own 60 the option.
-REXCVAR_DEFINE_BOOL(nights_true60, false, "NiGHTS",
-                    "60 frames a second of the game's own: one logic step a frame instead of two (the game steps its "
-                    "logic at 60 Hz and draws every other step), presented every refresh; the game's speed is "
-                    "unchanged. false = the game's 30 (two steps a frame), where nights_present_60 can add in-between "
-                    "frames")
+// 2026-11-23 (the user: "I want the game to be 60fps by default 30fps as an option instead"): on by default; false is
+// the 30 fps option (configs/renut_30fps.toml, the game menu's Frame rate row).
+REXCVAR_DEFINE_BOOL(nights_true60, true, "NiGHTS",
+                    "60 frames a second of the game's own (the default): one logic step a frame instead of two (the "
+                    "game steps its logic at 60 Hz and draws every other step), presented every refresh; the game's "
+                    "speed is unchanged. false = 30 (two steps a frame)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // nights-nx (2026-10-29, the user: "make 30fps also use this new framepacer as well"): at 30 the frame keeps its two
 // logic steps (the game's speed), but the once-a-frame work runs with the second step, the one that is drawn, instead
@@ -302,12 +295,11 @@ REX_HOOK_RAW(sub_822B91A8) {
 // nights_true60 they never registered. The check looks at the newest slot and one before it, which at 30 fps covers
 // the frame's two steps: run every frame it would see a finished sequence twice, so with nights_true60 the copy reads 0
 // every other call, the game's own rate of checks. Inert at 30 fps.
-REXCVAR_DEFINE_BOOL(nights_true60_button_codes, true, "NiGHTS",
-                    "With nights_true60: the game's button-sequence codes register at 60 fps. false = they do not")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// 2026-11-22 (the user: "get rid of button codes at 60fps just hardcode it on when 60fps is turned on"): always with
+// nights_true60; the key nights_true60_button_codes is gone (an old renut.toml's line is ignored).
 REX_EXTERN(__imp__sub_8224F938);
 REX_HOOK_RAW(sub_8224F938) {
-  static const bool on = REXCVAR_GET(nights_true60) && REXCVAR_GET(nights_true60_button_codes);
+  static const bool on = REXCVAR_GET(nights_true60);
   static bool check = false;
   check = !check;
   uint8_t *const copy = on && check ? PassCopy(base) : nullptr;

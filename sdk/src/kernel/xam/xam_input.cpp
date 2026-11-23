@@ -9,6 +9,10 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <string>
+#include <vector>
+#include <cstdlib>
+#include <cstring>
 #include <rex/input/input.h>
 #include <rex/input/input_system.h>
 #include <rex/kernel/xam/private.h>
@@ -18,6 +22,17 @@
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xtypes.h>
+
+#include <atomic>
+#include <chrono>
+
+#include <rex/cvar.h>
+
+// peggle2-nx (2026-10-20): which users the game asks for its controllers' state (local multiplayer: player 2 had no
+// control in a duel on the console). Off by default (a diagnostic).
+REXCVAR_DEFINE_BOOL(input_diag_users, false, "Input",
+                    "Diagnostic: every 10 s, XamInputGetState's calls by the user asked for (0-3, any) with how "
+                    "many found a controller and how many had a button or trigger held");
 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
@@ -93,9 +108,56 @@ u32 XamInputGetCapabilitiesEx_entry(u32 unk, u32 user_index, u32 flags,
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetstate(v=vs.85).aspx
 void SwitchKeyboardTestTick();  // xam_ui.cpp (banjo-nx, switch_software_keyboard_test)
+void SignInLateGuests();  // xam_user.cpp (culdcept-nx): pads that connect after the game's sign-in screen
+
+// culdcept-nx (2026-11-19, the user's second controller could not join Culdcept Saga's Versus lobby): the console's
+// XamInputGetState clears the state of a controller that is not connected. Culdcept's poll (sub_82389E28) ignores the
+// result and reads the state buffer, a stack slot the previous controller's poll had just filled: every unconnected
+// port read as a copy of the port polled before it, and the lobby's "which pad pressed A" (the last one wins) named an
+// unconnected, signed-out port. Player 1 alone could not join; with two controllers player 2's A came from port 4.
+REXCVAR_DEFINE_BOOL(xam_input_clear_disconnected, true, "Kernel",
+                    "XamInputGetState clears the state of a controller that is not connected, as the console does "
+                    "(a game that ignores the result reads zeros, not the previous poll's leftovers). false: the "
+                    "state is left as it was (before 2026-11-19)");
+
+// culdcept-nx (2026-11-19, diagnostic): guest words logged when they change, read at the game's controller polls.
+REXCVAR_DEFINE_STRING(debug_watch_u32, "", "Kernel",
+                      "Diagnostic: guest addresses (hex, comma separated) whose 32-bit big-endian words are logged "
+                      "when they change, checked at XamInputGetState");
+namespace {
+void WatchWords() {
+  static const std::vector<uint32_t> addresses = [] {
+    std::vector<uint32_t> out;
+    const std::string text = REXCVAR_GET(debug_watch_u32);
+    size_t at = 0;
+    while (at < text.size()) {
+      size_t end = text.find_first_of(",; ", at);
+      if (end == std::string::npos) end = text.size();
+      const std::string item = text.substr(at, end - at);
+      at = end + 1;
+      if (!item.empty()) out.push_back(uint32_t(std::strtoul(item.c_str(), nullptr, 16)));
+    }
+    return out;
+  }();
+  if (addresses.empty()) return;
+  static std::vector<uint32_t> last(addresses.size(), 0xDEADBEEFu);
+  static std::atomic_flag busy = ATOMIC_FLAG_INIT;
+  if (busy.test_and_set(std::memory_order_acquire)) return;
+  for (size_t i = 0; i < addresses.size(); ++i) {
+    const uint32_t v = rex::memory::load_and_swap<uint32_t>(REX_KERNEL_MEMORY()->TranslateVirtual(addresses[i]));
+    if (v != last[i]) {
+      REXKRNL_INFO("[watch] {:08X}: {:08X} -> {:08X}", addresses[i], last[i], v);
+      last[i] = v;
+    }
+  }
+  busy.clear(std::memory_order_release);
+}
+}  // namespace
 
 u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> input_state) {
   SwitchKeyboardTestTick();
+  SignInLateGuests();
+  WatchWords();
   // Games call this with a NULL state ptr, probably as a query.
   static int call_count = 0;
   if (++call_count <= 5) {
@@ -115,7 +177,45 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
   }
 
   auto* is = input_system();
-  return is->GetState(actual_user_index, input_state);
+  if (!REXCVAR_GET(input_diag_users)) {
+    const X_RESULT r = is->GetState(actual_user_index, input_state);
+    if (r != X_ERROR_SUCCESS && input_state && REXCVAR_GET(xam_input_clear_disconnected)) {
+      std::memset(input_state, 0, sizeof(X_INPUT_STATE));
+    }
+    return r;
+  }
+  // peggle2-nx (input_diag_users): [user][0] calls, [1] connected, [2] something held; user 4 = any.
+  static std::atomic<uint32_t> counts[5][3];
+  static std::atomic<int64_t> window_start{0};
+  const uint32_t slot = ((user_index & 0xFF) == 0xFF || (flags & XINPUT_FLAG_ANY_USER)) ? 4 : (user_index & 3);
+  const X_RESULT result = is->GetState(actual_user_index, input_state);
+  if (result != X_ERROR_SUCCESS && input_state && REXCVAR_GET(xam_input_clear_disconnected)) {
+    std::memset(input_state, 0, sizeof(X_INPUT_STATE));
+  }
+  counts[slot][0].fetch_add(1, std::memory_order_relaxed);
+  if (result == X_ERROR_SUCCESS) {
+    counts[slot][1].fetch_add(1, std::memory_order_relaxed);
+    if (input_state && (uint16_t(input_state->gamepad.buttons) || uint8_t(input_state->gamepad.left_trigger) ||
+                        uint8_t(input_state->gamepad.right_trigger)))
+      counts[slot][2].fetch_add(1, std::memory_order_relaxed);
+  }
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()).count();
+  int64_t start = window_start.load(std::memory_order_relaxed);
+  if (start == 0) {
+    window_start.compare_exchange_strong(start, now);
+  } else if (now - start >= 10000 && window_start.compare_exchange_strong(start, now)) {
+    std::string line;
+    for (uint32_t u = 0; u < 5; ++u) {
+      const uint32_t calls = counts[u][0].exchange(0), found = counts[u][1].exchange(0),
+                     held = counts[u][2].exchange(0);
+      if (calls)
+        line += fmt::format("{}user {}: {} calls, {} connected, {} with input", line.empty() ? "" : "; ",
+                            u == 4 ? std::string("any") : std::to_string(u), calls, found, held);
+    }
+    REXKRNL_INFO("[input] 10 s of XamInputGetState: {}", line.empty() ? std::string("no calls") : line);
+  }
+  return result;
 }
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputsetstate(v=vs.85).aspx
@@ -132,7 +232,48 @@ u32 XamInputSetState_entry(u32 user_index, u32 unk, ppc_ptr_t<X_INPUT_VIBRATION>
 
   (void)unk;  // Unused in this implementation
   auto* is = input_system();
-  return is->SetState(actual_user_index, vibration);
+  if (!REXCVAR_GET(input_diag_users)) {
+    return is->SetState(actual_user_index, vibration);
+  }
+  // nights-nx (2026-11-23, the user: rumble "doesn't seem to trigger"): with input_diag_users, every 10 s the game's
+  // vibration calls too, by the user asked for: how many, how many asked for a motor on, the strongest of each motor,
+  // and how many the input system answered as done (a pad, or a synthetic device), not connected or failed.
+  static std::atomic<uint32_t> calls[5], nonzero[5], ok[5], not_connected[5], failed[5], max_left[5], max_right[5];
+  static std::atomic<int64_t> window_start{0};
+  const uint32_t slot = (user_index & 0xFF) == 0xFF ? 4 : (user_index & 3);
+  const uint32_t left = uint16_t(vibration->left_motor_speed), right = uint16_t(vibration->right_motor_speed);
+  const X_RESULT result = is->SetState(actual_user_index, vibration);
+  calls[slot].fetch_add(1, std::memory_order_relaxed);
+  if (left || right)
+    nonzero[slot].fetch_add(1, std::memory_order_relaxed);
+  (result == X_ERROR_SUCCESS ? ok : result == X_ERROR_DEVICE_NOT_CONNECTED ? not_connected : failed)[slot].fetch_add(
+      1, std::memory_order_relaxed);
+  for (uint32_t m = max_left[slot].load(std::memory_order_relaxed);
+       left > m && !max_left[slot].compare_exchange_weak(m, left);) {
+  }
+  for (uint32_t m = max_right[slot].load(std::memory_order_relaxed);
+       right > m && !max_right[slot].compare_exchange_weak(m, right);) {
+  }
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()).count();
+  int64_t start = window_start.load(std::memory_order_relaxed);
+  if (start == 0) {
+    window_start.compare_exchange_strong(start, now);
+  } else if (now - start >= 10000 && window_start.compare_exchange_strong(start, now)) {
+    std::string line;
+    for (uint32_t u = 0; u < 5; ++u) {
+      const uint32_t c = calls[u].exchange(0), nz = nonzero[u].exchange(0), o = ok[u].exchange(0),
+                     nc = not_connected[u].exchange(0), f = failed[u].exchange(0), ml = max_left[u].exchange(0),
+                     mr = max_right[u].exchange(0);
+      if (c)
+        line += fmt::format("{}user {}: {} calls, {} with a motor on (strongest {} / {}), {} done, {} not connected, "
+                            "{} failed",
+                            line.empty() ? "" : "; ", u == 4 ? std::string("any") : std::to_string(u), c, nz, ml,
+                            mr, o, nc, f);
+    }
+    REXKRNL_INFO("[input] 10 s of XamInputSetState: {}", line.empty() ? std::string("no calls") : line);
+  }
+  return result;
 }
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetkeystroke(v=vs.85).aspx
@@ -191,11 +332,15 @@ i32 XamUserGetDeviceContext_entry(u32 user_index, u32 unk, mapped_u32 out_ptr) {
   // If this function fails they assume zero, so let's fail AND
   // set zero just to be safe.
   *out_ptr = 0;
-  if (!user_index || (user_index & 0xFF) == 0xFF) {
-    return X_E_SUCCESS;
-  } else {
-    return X_E_DEVICE_NOT_CONNECTED;
+  const i32 result = (!user_index || (user_index & 0xFF) == 0xFF) ? X_E_SUCCESS : X_E_DEVICE_NOT_CONNECTED;
+  if (REXCVAR_GET(input_diag_users)) {
+    // peggle2-nx (input_diag_users): every call while the diagnostic is on (few: the game asks at sign-in changes).
+    static std::atomic<uint32_t> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 400)
+      REXKRNL_INFO("[input] XamUserGetDeviceContext(user {}, {}) -> 0x{:08X}, context 0x{:08X}", uint32_t(user_index),
+                   uint32_t(unk), uint32_t(result), uint32_t(*out_ptr));
   }
+  return result;
 }
 
 }  // namespace xam

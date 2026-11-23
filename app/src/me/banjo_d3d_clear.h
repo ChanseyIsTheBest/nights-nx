@@ -9,9 +9,9 @@
 // stencil. On the console's level that was about 140 transfers a frame and 23 ms of GPU time a frame at stock clocks
 // (renut_003 of 2026-10-14: every top transfer pair had Direct3D's clear shaders as its consumer).
 //
-// What the layer adds. A hook on Direct3D's one-rectangle clear (sub_82223560; its only caller is D3DDevice_Clear's
-// per-rectangle step sub_822811A0) writes a marker NOP into the command buffer before Direct3D's own packets: the
-// rectangle, the sizes of the bound colour target 0 and depth surface (from the surface objects, as sub_822811A0 reads
+// What the layer adds. A hook on Direct3D's one-rectangle clear (sub_821F2750; its only caller is D3DDevice_Clear's
+// per-rectangle step sub_8224F110) writes a marker NOP into the command buffer before Direct3D's own packets: the
+// rectangle, the sizes of the bound colour target 0 and depth surface (from the surface objects, as sub_8224F110 reads
 // them), and the flags; a second marker after them. The ring (me_native_system.cpp) then knows that the rectangle list
 // between the markers is a Clear of the whole surface, and widens its overwrite rectangles over the surface's own pitch
 // padding and the rest of its last tile row: those tiles are taken whole.
@@ -64,7 +64,7 @@ inline bool On() {
   return on;
 }
 
-// A surface's width | height << 16, read as sub_822811A0 reads it (the word at +36: width - 1 in bits 18-31,
+// A surface's width | height << 16, read as sub_8224F110 reads it (the word at +36: width - 1 in bits 18-31,
 // height - 1 in bits 3-17); 0 without a surface.
 inline uint32_t SurfaceSize(uint8_t* base, uint32_t surface) {
   if (surface < 0x10000u || surface > 0xFFFFFF00u) return 0;
@@ -86,7 +86,7 @@ inline bool WriteNop(uint8_t* base, uint32_t device, const uint32_t* payload, ui
   return true;
 }
 
-// sub_82223560 (r3 = device, r4 = flags, r5 = the rectangle x1, y1, x2, y2): the begin marker. True when it was
+// sub_821F2750 (r3 = device, r4 = flags, r5 = the rectangle x1, y1, x2, y2): the begin marker. True when it was
 // written (the end marker is then due after the original).
 inline bool Begin(PPCContext& ctx, uint8_t* base) {
   if (!On()) return false;
@@ -116,7 +116,7 @@ inline void End(uint32_t device, uint8_t* base) {
 }
 
 // --- Resolve (banjo_d3d_api_resolve, step 2) ---------------------------------------------------------------------
-// D3DDevice_Resolve (8222D6C8): r3 = device, r4 = flags (low 3 bits: colour target 0-3, or 4 = the depth surface),
+// D3DDevice_Resolve (821FC7A0): r3 = device, r4 = flags (low 3 bits: colour target 0-3, or 4 = the depth surface),
 // r5 = the source rectangle (x1, y1, x2, y2) or 0 for the whole surface. The marker: [BJRS, whole surface w | h << 16
 // or 0 when the rectangle is not the whole surface]; [BJRE] after Direct3D's packets.
 inline constexpr uint32_t kResolveBegin = 0x424A5253u;  // 'BJRS'
@@ -138,7 +138,7 @@ inline bool ResolveBegin(PPCContext& ctx, uint8_t* base) {
   const uint32_t device = ctx.r3.u32, which = ctx.r4.u32 & 7u, rect = ctx.r5.u32;
   if (ctx.r3.u64 - 0x40000000ull >= 0x3F000000ull || which > 4) return false;
   // The surface Direct3D resolves from: colour target `which` (+12440 + 4 * which) or the depth surface (+12456),
-  // as sub_8222D6C8 picks it.
+  // as sub_821FC7A0 picks it.
   const uint32_t surface = native::L32(base + device + (which == 4 ? kDeviceDepth : kDeviceRt0 + 4u * which));
   const uint32_t size = SurfaceSize(base, surface);
   bool whole = size != 0;

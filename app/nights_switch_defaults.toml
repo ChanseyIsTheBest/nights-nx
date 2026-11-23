@@ -19,7 +19,12 @@ readback_memexport_fast = false
 # they get added to banjo_shaders.mesp (new areas of the game may have shaders the PC runs have not seen yet).
 
 # Logs go to logs/rex/ next to the NRO. Please send them back after a test.
-log_level = "warning"
+# 2026-11-23 (the user: "make sure profiling is off for the release build"): "off". The key takes trace, debug, info,
+# warn, error, critical or off; the "warning" written here before was refused, so every build logged at info and
+# wrote the SDK profiler's rex_profile.log every 10 s (it writes only while log_level is not "off", port 230). With
+# "off" no log file and no rex_profile.log are made; crash reports (rex_crash.log) still are. log_level = "info" in
+# renut.toml (or configs/renut_diagnostics.toml) turns both back on for a test.
+log_level = "off"
 # The file log is written by a thread of its own (from futari-nx): the ring thread never waits for the SD card.
 log_file_writer = true
 
@@ -48,6 +53,9 @@ banjo_stall_watch_seconds = 0
 switch_profile_stacks = false
 # The app's own sampler (logs/rex/banjo_profiler.log); configs/banjo_profile.toml turns it on as well.
 banjo_cpu_profiler = false
+# 2026-11-23 (profiling off): the SDK profiler's counts of the system calls it wraps (queue / dequeue buffer, fences,
+# cache cleans: its 10 s report's "libnx per second" line), not kept.
+switch_perf_count_calls = false
 
 # Performance enhancements (docs/enhancements.md). Each one is active only when its own key AND its group's master
 # switch are on; the log has one "[enhancements]" line saying what ran. Set a master to false for an A/B test.
@@ -462,8 +470,18 @@ license_mask = 1
 headless = true
 nights_renut_swap_pacing = true
 nights_renut_smaa_before_ps = "82E6A43836DB5864"
-nights_renut_double_buffer = true
-nights_renut_queue_drain = true
+# nights-nx (on the ultimate base, 2026-11-22): 1.0.2's nights_renut_double_buffer and nights_renut_queue_drain under the
+# base's names (pacman-nx's forms of sa2-nx's keys, the same code: renut_engine/display_sync.cpp, backend/video.cpp).
+pacman_renut_double_buffer = true
+pacman_renut_queue_drain = true
+# Port 196's GetFunction (d3d/hooks/shader.cpp): NiGHTS reads its shaders back, so the records keep their containers.
+banjo_renut_shader_get_function = true
+# The base's port 59 (the game's own vibration, input_rumble) is on in the base; 1.0.2 had no rumble: off until the user
+# decides (docs/nights-ultimate-notes.md, "Settings").
+input_rumble = false
+# NiGHTS makes no MSAA target of its own: the game menu's MSAA row (msaa_level 2 / 4) gives its single-sample targets
+# that many samples (the user, 2026-11-22: "make sure MSAA works"); msaa_level stays 1 (off) by default, SMAA on.
+renut_msaa_single_sample = true
 [input_p1]
 
 [input_p2]

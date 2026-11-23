@@ -41,7 +41,13 @@
 
 #include <malloc.h>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
+
+// kameo-nx (2026-11-05): defined at the end of this file.
+bool RexWindowBlocksOn();
+// kameo-nx (2026-11-05): what ui/switch_code_blocks.cpp did, before there was a log.
+extern "C" const char* RexCodeBlocksStatus(void);
 #include <rex/memory/utils.h>
 
 #include "guest_memory_switch.h"
@@ -167,6 +173,21 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
     return nullptr;
   }
 
+  // port 56 (mk9-nx's fallbacks, guest_memory_switch.cpp): logged when they change. A plain sum compared: the four
+  // counters only grow.
+  {
+    static uint64_t logged = 0;
+    uint64_t retries = 0, pagewise = 0, unmaps = 0, unmap_failures = 0;
+    uint32_t first_rc = 0;
+    RexGmFallbacks(&retries, &pagewise, &unmaps, &unmap_failures, &first_rc);
+    if (const uint64_t sum = retries + pagewise + unmaps + unmap_failures; sum != logged) {
+      logged = sum;
+      REXLOG_WARN("[gm] fallbacks: {} waits of 100 ms for the kernel's memory blocks, {} chunks mapped page by page "
+                  "(first failed map 0x{:X}), {} unmaps page by page ({} pages failed)",
+                  retries, pagewise, first_rc, unmaps, unmap_failures);
+    }
+  }
+
   // The core always commits memory as accessible and keeps any existing protection;
   // the requested permission is applied on top. In the common case (read-write on
   // an unprotected range) this returns immediately.
@@ -203,6 +224,9 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
   switch (deallocation_type) {
     case DeallocationType::kDecommit:
     case DeallocationType::kRelease:
+      // peggle2-nx: the backing stays, so clear it now: committed again later, the range must read as zeros, as on
+      // the Xbox 360 and with VirtualFree/VirtualAlloc on the PC (guest code relies on fresh pages being zero).
+      RexGmZero(static_cast<size_t>(static_cast<uint8_t*>(base_address) - RexGmBase()), length);
       return RexGmProtect(static_cast<uint8_t*>(base_address), length, REX_GM_NONE, nullptr);
     default:
       return false;
@@ -259,12 +283,17 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
   // Horizon has no named shared memory and no sparse memory. The "file" is the
   // window of the guest memory core, and it is reserved here, empty. Real memory
   // arrives with AllocFixed(kCommit).
+  if (!RexGmBase()) RexGmSetWindowBlocks(RexWindowBlocksOn());
   if (!RexGmBase() && !RexGmInit(AlignUp(length))) {
     REXLOG_ERROR("Could not reserve the guest window of 0x{:X} bytes. "
                  "Title takeover is required: in applet mode there is no room.",
                  length);
     return kFileMappingHandleInvalid;
   }
+  REXLOG_INFO("[window blocks] guest window at 0x{:X}, {} a 2 MB boundary (banjo_window_blocks)",
+              reinterpret_cast<uintptr_t>(RexGmBase()),
+              (reinterpret_cast<uintptr_t>(RexGmBase()) & 0x1FFFFF) ? "not on" : "on");
+  REXLOG_INFO("{}", RexCodeBlocksStatus());
   return kSwitchMapping;
 }
 
@@ -304,5 +333,15 @@ bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) 
 }
 
 }  // namespace rex::memory
+
+// kameo-nx (2026-11-05): at the end of the file, so that the other functions keep their PGO profile.
+REXCVAR_DEFINE_BOOL(banjo_window_blocks, true, "Banjo/Switch",
+                    "The guest window on a 2 MB boundary, so that the kernel can use 2 MB blocks for the game's memory. "
+                    "false: anywhere, on 4 KB pages, as in version 1.0.0");
+REXCVAR_DEFINE_BOOL(banjo_code_blocks, true, "Banjo/Switch",
+                    "The NRO's code and read-only data on 2 MB blocks (ui/switch_code_blocks.cpp, which reads this key "
+                    "from katamari.toml itself, because it runs before the cvars). false: on 4 KB pages, as in version 1.0.0");
+
+bool RexWindowBlocksOn() { return REXCVAR_GET(banjo_window_blocks); }
 
 #endif  // REX_PLATFORM_SWITCH

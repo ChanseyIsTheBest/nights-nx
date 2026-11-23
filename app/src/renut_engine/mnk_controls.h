@@ -9,8 +9,8 @@
 // then the game's deadzone/response curve on top).
 //
 // Instead we drive the player's movement input at the point the game itself
-// consumes it: sub_8239FF20 builds one frame of normalized pad state (buttons +
-// two -1..1 stick vectors + two 0..1 triggers) and hands it to sub_821FBD90,
+// consumes it: sub_8236CB80 builds one frame of normalized pad state (buttons +
+// two -1..1 stick vectors + two 0..1 triggers) and hands it to sub_821CB628,
 // which commits it into the pad object every avatar/camera update reads from.
 // We hook the handoff and write our keyboard/mouse values straight into that
 // block, so movement and camera are exactly what the keys and mouse say -- no

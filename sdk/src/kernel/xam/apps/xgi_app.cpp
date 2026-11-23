@@ -10,6 +10,7 @@
  */
 
 #include <atomic>
+
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
 #include <rex/thread.h>
@@ -331,11 +332,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       REXKRNL_DEBUG("XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
                     xuids_ptr, specs_count, specs_ptr, results_size, results_ptr);
 
-      // nights-nx (from peggle1-nx through zumasrevenge-nx's SDK, 2026-10-21): there are no leaderboards without
-      // Xbox Live, so the read fails, as it does for a profile that is not signed in to Live. Before, it succeeded
-      // without writing the results: Peggle read its freshly allocated buffer as XUSER_STATS_READ_RESULTS
-      // (dwNumViews, pViews) and followed pViews into unmapped memory. NiGHTS has score leaderboards. The header is
-      // zeroed too (no views), for a caller that ignores the error.
+      // peggle1-nx (2026-10-21): there are no leaderboards without Xbox Live, so the read fails, as it does for a
+      // profile that is not signed in to Live. Before, it succeeded without writing the results: Peggle read its
+      // freshly allocated buffer as XUSER_STATS_READ_RESULTS (dwNumViews, pViews) and, when the heap left a count of
+      // 1 or more there, followed pViews into unmapped memory (sub_822B0E48 reading pViews->pRows; a player's three
+      // crashes, guest address 0x43FA000C). The header is zeroed too (no views), for a caller that ignores the error.
       if (results_ptr && results_size >= 8 && memory_->LookupHeap(results_ptr)) {
         auto* results = memory_->TranslateVirtual(results_ptr);
         memory::store_and_swap<uint32_t>(results + 0, 0);  // dwNumViews

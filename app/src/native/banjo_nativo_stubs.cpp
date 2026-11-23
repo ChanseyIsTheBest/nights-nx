@@ -22,7 +22,7 @@ namespace nfsmw::escenario_lod {
 std::string Resumen() { return {}; }
 }  // namespace nfsmw::escenario_lod
 
-// NFSMW read its own MSAA mode from a game global (0x82A2D1AC) to scale occlusion query results. Banjo's
+// NFSMW read its own MSAA mode from a game global (0x82A89574) to scale occlusion query results. Banjo's
 // native path draws without MSAA (render targets are single-sampled), so the sample count is 1.
 namespace nfsmw::render_targets {
 uint32_t MuestrasOriginalesModoActual(const uint8_t*) { return 1; }

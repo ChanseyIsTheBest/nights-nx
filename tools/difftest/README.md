@@ -18,6 +18,21 @@ shader translator, turned into Python and run on random inputs; the outputs (and
   float32), and constants drawn in read order differ between two programs that read them in another order (key them).
   Loops in the decompile (`do`) are not supported: test the specialised variants. Check a deliberately broken copy too
   (a wrong arm, a changed constant) so the test is known to catch differences.
+  Options (renut-ultimate, ports 94 and 113, from vivapinata-nx): `--inputs LO:HI` (the inputs' range, -2:2 by default),
+  `--cbmask C:I[-J]:comps:MASK` (constant words masked, e.g. a scale code kept at 0), `--cbset C:I:comp:VALUE` (a word
+  pinned), `--texalias B=A` (binding B reads binding A's texels) and `--texcopy B:y=x` (a component copies another), for
+  paths that assume two inputs equal. Each run works in a temp folder of its own, removed when it ends.
+- `difftest_vs.py` (renut-ultimate, port 94, with vivapinata-nx): the same for vertex shaders. Every gl_Position,
+  out_attrN and clip distance is compared, and so are local memory, storage-buffer stores (memory export) and every
+  texture fetch's coordinates (as a multiset: the GPU compiler orders fetches its own way). An output counts as live
+  when it took two or more finite values over the trials; a run that compared nothing live says NOTHING LIVE. A
+  memory-export shader needs an export window and register to store anything (`--cbset 4:61:x:0 --cbset 4:61:y:0x7FFFFFFF
+  --cbset 4:61:z:0 --cbset 2:0:x:0x00001000 --cbset 2:0:y:0x4B000000 --cbset 2:0:z:0x00002600 --cbset 2:0:w:0x4B7FFFFF`
+  for Beautiful Katamari's); a large one with the window set can grow to 10 GB: run those one at a time.
+  `python difftest_vs.py <before.glsl> <after.glsl> [trials] [N=value ...] [--cbmask ...] [--cbset ...]`.
+- A rare mismatch (one trial in twenty, a value a texel or an ulp off) may be the GPU compiler fusing a multiply-add in
+  one program and not the other: set `difftest_ps.FMA` to the unfused form and run again; if it goes, it was fusion,
+  not the pass.
 - `batch_gs.py`: guardsel on a list of shaders, each with up to two of its logged variants' constants
   (`python batch_gs.py <hash,hash,...> [trials]`; paths inside: the base GLSL folder and the emulator's variant log).
 - `difftest_vs_skin.py` (2026-10-20): the skinonce pass (constant 913) on a fur vertex shader. The shader before the

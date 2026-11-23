@@ -443,6 +443,11 @@ namespace plume {
             return VK_FORMAT_D32_SFLOAT_S8_UINT;
         case RenderFormat::D24_UNORM_S8_UINT:  // banjo-nx (2026-10-19)
             return VK_FORMAT_D24_UNORM_S8_UINT;
+        // sasrt-nx (2026-11-11, port 75; its formats batch, rows 6, 8, 10, 74, 93 and 7, 66, 73, 95, 96)
+        case RenderFormat::R10G10B10A2_UNORM:
+            return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        case RenderFormat::R11G11B10_FLOAT:
+            return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
         case RenderFormat::S8_UINT:
             return VK_FORMAT_S8_UINT;
         case RenderFormat::R32_FLOAT:
@@ -595,6 +600,8 @@ namespace plume {
             return VK_CULL_MODE_FRONT_BIT;
         case RenderCullMode::BACK:
             return VK_CULL_MODE_BACK_BIT;
+        case RenderCullMode::FRONT_AND_BACK:  // kameo-nx (2026-11-04)
+            return VK_CULL_MODE_FRONT_AND_BACK;
         default:
             assert(false && "Unknown cull mode.");
             return VK_CULL_MODE_FLAG_BITS_MAX_ENUM;

@@ -50,8 +50,21 @@ def CodeOnly(text):
     return re.sub(r'__imp__sub_[0-9A-Fa-f]{8}', ' ', text)
 
 
-def hooked():
+def code_address_re(gen):
+    """renut-ultimate (2026-11-16, port 144; tw2de_nx's): the guest code addresses the hook sources name: 82xxxxxx, and
+    83xxxxxx too when the game's code runs there (its function table, <project>_init.cpp, has entries at 0x83000000 and
+    above: TW2's sub_833C2518 ...); a hook there was not seen, so its calls went past it. A tree without such entries
+    reads the sources as before (an 83xxxxxx number there is not a function)."""
+    import glob as _glob
+    for p in _glob.glob(os.path.join(gen, '*_init.cpp')):
+        if re.search(r'\{ 0x83[0-9A-Fa-f]{6},', open(p, encoding='utf-8', errors='ignore').read()):
+            return r'(?<![0-9A-Fa-f])(8[23][0-9A-Fa-f]{6})(?![0-9A-Fa-f])'
+    return r'(?<![0-9A-Fa-f])(82[0-9A-Fa-f]{6})(?![0-9A-Fa-f])'
+
+
+def hooked(gen=GEN):
     names = set()
+    addr_re = code_address_re(gen)  # port 144
     for root in SOURCES:
         if os.path.isfile(root):
             paths = [root]
@@ -73,7 +86,7 @@ def hooked():
             if os.path.basename(path) == 'renut_config.toml':
                 # non_argument_as_local's keep list names functions that keep r11/r12 in ctx, not hooks
                 text = re.sub(r'non_argument_as_local_keep\s*=\s*\[.*?\]', ' ', text, flags=re.S)
-            for m in re.findall(r'(?<![0-9A-Fa-f])(82[0-9A-Fa-f]{6})(?![0-9A-Fa-f])', text):
+            for m in re.findall(addr_re, text):
                 names.add('sub_' + m.upper())
     return names
 
@@ -89,7 +102,7 @@ def main():
     if '--hooked-list' in sys.argv:
         with_hook = set(open(sys.argv[sys.argv.index('--hooked-list') + 1], encoding='utf-8').read().split())
     else:
-        with_hook = hooked()
+        with_hook = hooked(gen)
     call = re.compile(r'(?<![\w])sub_([0-9A-F]{8})\(ctx, base\);')
     direct = re.compile(r'__imp__sub_([0-9A-F]{8})\(ctx, base\);')
     changed = 0

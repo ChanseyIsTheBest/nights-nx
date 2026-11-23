@@ -111,9 +111,36 @@ struct WriteLog {
 
 // banjo-nx (2026-10-19): a range a hand-written native writes (outside the stack) marks its store cards, as the guest
 // code's stores would (rex/system/xmemory.h; Renut proves its cached vertex and index copies by them).
+// blur-nx (2026-11-13, M-22 of docs/cpu-moonshots-50-1113.md): a range of one or two pages (nearly every native store)
+// marks as the copies' own stores do (banjo_hot_prelude.h's rex_card_mark_, VS-11/VS-12): only the pages whose card
+// Renut reads (the views it checks and the page in front of each), the card byte written only when it is not zero yet.
+// MarkStoreCardsAt's page loop became a memset call (the copies held at least 136 card-range `bl memset`s, about
+// 0.5 ms a frame, mostly in the job-queue and audio copies the hand natives are inlined into). Exact for every card
+// Renut reads (the other cards are never read); a longer range marks as before. BLUR_CARD_RUN_ALL_PAGES: as before.
+#if !defined(BLUR_CARD_RUN_ALL_PAGES)
+[[gnu::always_inline]] inline void CardPage(uint8_t* base, uint32_t page) {
+  if (page - 0x9FFFFu <= 0x60000u || page - 0x7EFFFu <= 0x1000u) {
+    uint8_t* const card = base + page;
+    if (*card) *card = 0;
+  }
+}
+[[gnu::always_inline]] inline void Card(uint8_t* base, uint32_t addr, uint32_t len) {
+  if (!len) return;
+  const uint64_t end = uint64_t(addr) + len - 1;
+  const uint32_t first = addr >> 12;
+  const uint32_t last = end > 0xFFFFFFFFull ? 0xFFFFFu : uint32_t(end >> 12);
+  if (last - first <= 1) {
+    CardPage(base, first);
+    if (last != first) CardPage(base, last);
+    return;
+  }
+  rex::memory::MarkStoreCardsAt(base, addr, len);
+}
+#else
 [[gnu::always_inline]] inline void Card(uint8_t* base, uint32_t addr, uint32_t len) {
   rex::memory::MarkStoreCardsAt(base, addr, len);
 }
+#endif
 
 // The copy that runs: nothing is recorded, nothing stops it. Every member folds to a constant.
 struct Fast {
@@ -174,3 +201,27 @@ struct Counting {
   (s.Note((u32)(r) + (u32)(d), 4) ? (void)(REX_STORE_D_U32(r, d, y), REX_CARD((u32)(r) + (u32)(d))) : (void)0)
 #define BANJO_HOT_STORE_D_U64_C(r, d, y) \
   (s.Note((u32)(r) + (u32)(d), 8) ? (void)(REX_STORE_D_U64(r, d, y), REX_CARD((u32)(r) + (u32)(d))) : (void)0)
+// blur-nx (2026-11-13, M-23): tools/float_loads.py's single stores from the vector unit, as the 32-bit ones.
+#define BANJO_HOT_STORE_F32ANY(x, v) (s.Note((u32)(x), 4) ? (void)(REX_STORE_F32ANY(x, v)) : (void)0)
+#define BANJO_HOT_STORE_D_F32ANY(r, d, v) \
+  (s.Note((u32)(r) + (u32)(d), 4) ? (void)(REX_STORE_D_F32ANY(r, d, v)) : (void)0)
+#define BANJO_HOT_STORE_F32ANY_C(x, v) (s.Note((u32)(x), 4) ? (void)(REX_STORE_F32ANY(x, v), REX_CARD(x)) : (void)0)
+#define BANJO_HOT_STORE_D_F32ANY_C(r, d, v) \
+  (s.Note((u32)(r) + (u32)(d), 4) ? (void)(REX_STORE_D_F32ANY(r, d, v), REX_CARD((u32)(r) + (u32)(d))) : (void)0)
+// sasrt-nx (2026-11-11, port 74; its idea 52): a prefetch of the guest node a pointer-chasing loop just loaded
+// (tools/localize_native.py, PREFETCH). A hint: it cannot fault. CMake SASRT_HOT_PREFETCH=OFF: nothing.
+#ifndef REX_PREFETCH_GUEST
+#if defined(SASRT_HOT_PREFETCH_OFF)
+#define REX_PREFETCH_GUEST(a) ((void)0)
+#else
+#define REX_PREFETCH_GUEST(a) __builtin_prefetch(REX_RAW_ADDR((u32)(a)))
+#endif
+#endif
+// sasrt-nx (2026-11-11, port 74; its idea 39): tools/localize_native.py's store-card runs; nothing unless
+// banjo_hot_prelude.h (the bulk shards, CMake SASRT_HOT_CARD_RUNS, copies written with the runs) defines them.
+#ifndef REX_CARD_RUN_DECL
+#define REX_CARD_RUN_DECL
+#endif
+#ifndef REX_CARD_FLUSH
+#define REX_CARD_FLUSH() ((void)0)
+#endif

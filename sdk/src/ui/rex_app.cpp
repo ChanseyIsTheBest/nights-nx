@@ -12,7 +12,6 @@
 #include <rex/rex_app.h>
 
 #include <cstdlib>
-#include <fstream>  // nights-nx (2026-10-29): DefaultConfigFile
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
@@ -54,6 +53,9 @@ extern "C" {
 extern u32 __nx_applet_exit_mode;
 NX_NORETURN void __libnx_exit(int rc);
 void RexSwitchNeonProbe(void);
+// Port 159 (from fnxf_xiii): the HOME menu's close is held (appletLockExit) until the app's shutdown has run.
+Result appletLockExit(void);
+Result appletUnlockExit(void);
 }
 #endif
 
@@ -61,8 +63,12 @@ void RexSwitchNeonProbe(void);
 #include <imgui.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string_view>
+#include <thread>
 
 #if REX_PLATFORM_SWITCH
 // banjo-nx (2026-10-27): core/threading_switch.cpp (its header clashes with switch.h users).
@@ -70,6 +76,14 @@ extern "C" int RexSwitchInitSystemCore(void);
 extern "C" int RexSwitchEnsureForwarderNpdm(void);
 #endif
 
+// Port 159 (from fnxf_xiii, its note of 2026-10-24): closing from the HOME menu runs the app's own shutdown
+// (OnShutdown: the renderer stops its threads, waits for the GPU's queued work and saves its caches' last batch) on a
+// thread of its own, waited for at most 3 s, before the hard exit. The close is held until then (appletLockExit after
+// the config is read; Horizon still ends the process 15 s after the request). Off: the hard exit at once, as before.
+REXCVAR_DEFINE_BOOL(banjo_switch_close_shutdown, false, "GPU",
+                    "Switch: closing from HOME runs the app's shutdown (at most 3 s: GPU work finished, caches "
+                    "saved) before the process ends")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
@@ -77,6 +91,12 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
 REXCVAR_DEFINE_STRING(gpu_backend, "any", "GPU",
                       "Host API of the GPU emulation plugin: 'any' (D3D12 first where compiled), 'd3d12' or 'vulkan'")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// Port 193 (TFU-nx's): sdk/src/core/cvar.cpp, the last LoadConfig parse failure. Declared here, not in rex/cvar.h:
+// that header is in every generated file's include chain, and changing it recompiles the whole game.
+namespace rex::cvar {
+const std::string& LastConfigError();
+}  // namespace rex::cvar
 
 namespace rex {
 
@@ -180,9 +200,9 @@ bool ReXApp::SetupEnvironment() {
   config_path_ = path_config.config_path;
   resolved_defaults_ = std::move(path_config);
 
-  // Load config FIRST so log cvars have final values. nights-nx (2026-10-29, from sa2-nx): the application's built-in
-  // defaults go first and the config file overrides them key by key; without a config file, the application's default
-  // one is written first, so the player has a file to edit.
+  // Load config FIRST so log cvars have final values. The application's built-in defaults go first; the config
+  // file overrides them key by key. sa2-nx: without a config file, the application's default one is written first,
+  // so the player has a file to edit.
   if (const std::string_view default_file = DefaultConfigFile();
       !default_file.empty() && !config_path_.empty() && !std::filesystem::exists(config_path_)) {
     std::ofstream out(config_path_, std::ios::binary);
@@ -197,6 +217,10 @@ bool ReXApp::SetupEnvironment() {
   // the command line's and the defaults only), and the forwarder's NPDM for the toml's program id.
   RexSwitchInitSystemCore();
   RexSwitchEnsureForwarderNpdm();
+  // Port 159 (fnxf_xiii): HOME's close held until OnClosing has run the shutdown (banjo_switch_close_shutdown).
+  if (REXCVAR_GET(banjo_switch_close_shutdown) && appletLockExit() != 0) {
+    REXLOG_WARN("Switch: appletLockExit failed: closing from HOME ends the process without its shutdown");
+  }
 #endif
 
   // Late-phase logging
@@ -221,8 +245,13 @@ bool ReXApp::SetupEnvironment() {
 
   OnPostInitLogging();
 
-  if (std::filesystem::exists(config_path_))
-    REXLOG_DEBUG("Loaded config: {}", config_path_.filename().string());
+  // Port 193 (TFU-nx's): said at info level, and a parse failure as an error, so a log always shows which settings ran.
+  if (!rex::cvar::LastConfigError().empty())
+    REXLOG_ERROR("CONFIG NOT LOADED (every setting in it ignored): {}", rex::cvar::LastConfigError());
+  else if (std::filesystem::exists(config_path_))
+    REXLOG_INFO("Loaded config: {}", config_path_.string());
+  else
+    REXLOG_INFO("No config file at {}: defaults", config_path_.string());
 
   REXLOG_DEBUG("{} starting", GetName());
   if (!game_data_root_.empty()) {
@@ -294,6 +323,9 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     auto* input_sys = static_cast<rex::input::InputSystem*>(runtime_->input_system());
     if (input_sys) {
       input_sys->SetActiveCallback([this]() {
+        // blur-nx (2026-11-18): an application's full-screen menu (the game menu) owns every button while it is up.
+        if (rex::ui::GameInputBlocked())
+          return false;
         if (!debug_overlay_ && !console_overlay_ && !settings_overlay_ && !achievements_overlay_)
           return true;
 #if REX_PLATFORM_SWITCH
@@ -577,6 +609,26 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
   if (runtime_ && runtime_->kernel_state()) {
     runtime_->kernel_state()->TerminateTitle();
   }
+  // Port 159 (from fnxf_xiii, banjo_switch_close_shutdown): the app's own shutdown first, which the hard exit below
+  // skips (the process ended with GPU work in flight and the shader cache's last batch unwritten). On a thread of its
+  // own, waited for at most 3 s: a shutdown that runs into the deadlock below is left behind.
+  if (REXCVAR_GET(banjo_switch_close_shutdown)) {
+    static std::atomic<bool> app_shutdown_done{false};
+    auto* worker = new std::thread([this]() {
+      OnShutdown();
+      app_shutdown_done.store(true, std::memory_order_release);
+    });
+    const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!app_shutdown_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < give_up)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    if (app_shutdown_done.load(std::memory_order_acquire)) {
+      worker->join();
+      delete worker;
+      REXLOG_INFO("App shutdown done.");
+    } else {
+      REXLOG_WARN("App shutdown still running after 3 s: exiting without it.");  // the thread is left (never joined)
+    }
+  }
   // Hard-exit rather than run subsystem teardown, which can deadlock on a host
   // lock still held by a straggler TerminateTitle left running. Flush (not
   // ShutdownLogging, which frees loggers a straggler may still use); the OS
@@ -591,6 +643,9 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
   // occurred"): with __nx_applet_exit_mode = 1, libnx closes the services and
   // sends ISelfController::Exit. See windowed_app_main_switch.cpp.
   std::fflush(nullptr);
+  if (REXCVAR_GET(banjo_switch_close_shutdown)) {
+    appletUnlockExit();  // port 159: locked after the config was read
+  }
   __nx_applet_exit_mode = 1;
   __libnx_exit(0);
 #else
@@ -689,8 +744,12 @@ void ReXApp::OnDestroy() {
     window_->RemoveInputListener(this);
     window_->RemoveListener(this);
   }
-  window_.reset();
+  // peggle1-nx (2026-10-21): the runtime first, while the window is still alive. Its input system's keyboard/mouse
+  // driver detaches from the window in its destructor (MnkInputDriver::DetachFromWindow); with the window gone first
+  // that touched a destroyed window and threw std::system_error ("Invalid argument") out of a destructor: a
+  // std::terminate crash log at every exit on the console.
   runtime_.reset();
+  window_.reset();
 }
 
 void ReXApp::SetGuestFrameStats(ui::DebugOverlayDialog::FrameStatsProvider provider) {

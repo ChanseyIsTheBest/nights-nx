@@ -55,11 +55,21 @@ if(REXGLUE_PLATFORM_SWITCH)
             message(FATAL_ERROR "No ${${_banjo_tool}}: run tools/deko3d_build_tools.sh first")
         endif()
     endforeach()
+    # katamari-nx (2026-11-02, futari-nx's design): the release build (tools/renut_release_shaders.py,
+    # app/out/renut_switch_release): no translated game shader in the NRO and the shader table without SPIR-V; the game's
+    # shaders come from deko3d_glsl.bin beside the NRO, which the web installer makes from the player's files. OFF (the
+    # everyday build): every translated shader built in (app/out/renut_switch).
+    option(BANJO_RENUT_RELEASE_SHADERS "Switch: no translated game shader in the NRO (deko3d_glsl.bin beside it)" OFF)
+    if(BANJO_RENUT_RELEASE_SHADERS)
+        set(_banjo_renut_shaders "${CMAKE_SOURCE_DIR}/out/renut_switch_release")
+    else()
+        set(_banjo_renut_shaders "${CMAKE_SOURCE_DIR}/out/renut_switch")
+    endif()
     # The game shaders' GLSL for deko3d (tools/deko3d_shader_package.py), embedded next to the SPIR-V cache.
-    set(BANJO_DEKO3D_GLSL_CPP "${CMAKE_SOURCE_DIR}/out/renut_switch/deko3d_glsl_switch.cpp" CACHE FILEPATH
-        "The deko3d GLSL package's source (tools/deko3d_shader_package.py)")
-    set(BANJO_RENUT_SHADER_CACHE_CPP "${CMAKE_SOURCE_DIR}/out/renut_switch/shader_cache_switch.cpp" CACHE FILEPATH
-        "Renut's shader cache for the Switch build (from a PC build: tools/renut_switch_shader_cache.py)")
+    set(BANJO_DEKO3D_GLSL_CPP "${_banjo_renut_shaders}/deko3d_glsl_switch.cpp" CACHE FILEPATH
+        "The deko3d GLSL package's source (tools/deko3d_shader_package.py)" FORCE)
+    set(BANJO_RENUT_SHADER_CACHE_CPP "${_banjo_renut_shaders}/shader_cache_switch.cpp" CACHE FILEPATH
+        "Renut's shader cache for the Switch build (from a PC build: tools/renut_switch_shader_cache.py)" FORCE)
     function(banjo_renut_shader_cache_override TARGET)
         if(NOT EXISTS "${BANJO_RENUT_SHADER_CACHE_CPP}")
             message(FATAL_ERROR "No ${BANJO_RENUT_SHADER_CACHE_CPP}: build the PC tree first, then run "
@@ -75,6 +85,8 @@ include("${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/gpu.cmake")
 add_library(banjo_renut_gpu OBJECT
     "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/banjo_renut_select.cpp"
     "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/banjo_renut_tuning.cpp"
+    "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/ultimate.cpp"  # renut-ultimate: the ported fixes' switches
+    "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/sasrt_gpu_round.cpp"  # sasrt-nx's GPU rounds (2026-11-08, night)
     "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/banjo_renut_checks.cpp"
     "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/banjo_renut_record.cpp"
     # banjo-nx (2026-10-19, latency batch 3): the display's refresh for the frame limiter (it reads the presents' fences)
@@ -93,6 +105,8 @@ if(REXGLUE_PLATFORM_SWITCH)
     if(EXISTS "${BANJO_DEKO3D_GLSL_CPP}")
         target_sources(banjo_renut_gpu PRIVATE "${BANJO_DEKO3D_GLSL_CPP}")
         set_source_files_properties("${BANJO_DEKO3D_GLSL_CPP}" PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    elseif(BANJO_RENUT_RELEASE_SHADERS)
+        message(STATUS "banjo: no GLSL package in the NRO (BANJO_RENUT_RELEASE_SHADERS): deko3d_glsl.bin beside it")
     else()
         message(WARNING "No ${BANJO_DEKO3D_GLSL_CPP}: renut_gpu_backend = deko3d will have no game shaders "
                         "(tools/deko3d_shader_package.py)")
@@ -110,6 +124,12 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set_property(SOURCE
         "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/render/draw.cpp"
         "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/guest/command_buffers.cpp"
+        # banjo-nx (2026-11-20, sasrt-nx's render-thread round 2 #10): the switches' accessors the draw path calls
+        # (ultimate.cpp: 51 statics, each a key's value; banjo_renut_tuning.cpp: the same, its A/B list under
+        # std::call_once; render_thread.cpp: one constant-initialised atomic).
+        "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/ultimate.cpp"
+        "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/banjo_renut_tuning.cpp"
+        "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/backend/render_thread.cpp"
         TARGET_DIRECTORY banjo_renut_gpu APPEND PROPERTY COMPILE_OPTIONS "-fno-threadsafe-statics")
 endif()
 # banjo-nx (2026-10-28): BANJO_SWITCH_RENDERER_LINES also gives Renut's hot render-thread files line tables (-g1), so a
@@ -130,3 +150,10 @@ if(REXGLUE_PLATFORM_SWITCH AND NOT REXGLUE_SWITCH_NVK)
 endif()
 target_link_libraries(renut PRIVATE banjo_renut_gpu)
 target_compile_definitions(renut PRIVATE BANJO_RENUT_RENDERER=1)
+# katamari-nx (2026-10-30): Renut's hooks at Beautiful Katamari's functions (tools/renut_hook_remap_katamari.py,
+# docs/katamari-notes.md) are registered in this build; OFF compiles them unregistered (banjo_renut_select.h).
+option(KATAMARI_RENUT_HOOKS "Register Renut's hooks at Beautiful Katamari's functions" ON)
+if(KATAMARI_RENUT_HOOKS)
+    target_compile_definitions(banjo_renut_gpu PRIVATE KATAMARI_RENUT_HOOKS=1)
+    target_compile_definitions(renut PRIVATE KATAMARI_RENUT_HOOKS=1)
+endif()

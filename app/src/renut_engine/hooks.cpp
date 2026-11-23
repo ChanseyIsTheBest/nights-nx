@@ -97,7 +97,7 @@ bool meGetResolutionParams_hook(PPCRegister& r5, PPCRegister& r6) {
     return false;
 }
 
-// The game's D3D wait for ring space (sub_8228F558, before each sub_8264DCD0 check): sleeps until the native ring
+// The game's D3D wait for ring space (sub_8225D370, before each sub_82634740 check): sleeps until the native ring
 // thread advances instead of spinning (me::native::WaitRingProgress; a yield without the native renderer).
 void Optimization_Hook() {
     me::native::WaitRingProgress();
@@ -136,7 +136,7 @@ bool disable_cao() {
 }
 
 // Zero the MultiSample argument (r6) at the two scene render-target creations in
-// sub_823ED2A8, forcing D3DMULTISAMPLE_NONE for the color + depth surfaces. This
+// sub_823BB220, forcing D3DMULTISAMPLE_NONE for the color + depth surfaces. This
 // deliberately leaves the MSAA-mode global, the tile count and the surface
 // dimensions untouched, so predicated tiling and every projection/viewport input
 // are identical to stock -- matrices are unaffected. Both surfaces share a
@@ -154,7 +154,7 @@ void disable_msaa_depth(PPCRegister& r6) {
 }
 
 // Returning true makes the hook jump past the fullscreen blur draw in the
-// fxMotionBlur pass (sub_8229F440), so the scene is never composited with its
+// fxMotionBlur pass (sub_8226D308), so the scene is never composited with its
 // motion-blur history. The surrounding Resolves/state restore still run.
 bool disable_motion_blur() {
     return REXCVAR_GET(disable_motion_blur);
@@ -162,14 +162,14 @@ bool disable_motion_blur() {
 
 // Fix the split-second black flash on heal/damage feedback.
 //
-// The a34-gated branch of the feedback overlay sub_82573650 calls the glow/bloom
-// pass sub_825740F0, which allocates a scratch surface at
+// The a34-gated branch of the feedback overlay sub_825570B8 calls the glow/bloom
+// pass sub_82557B48, which allocates a scratch surface at
 // D3DSURFACE_PARAMETERS.Base = 0 -- i.e. aliased onto EDRAM tile 0, the main
 // framebuffer -- and Clears it to black before blurring. On real Xenos that
 // EDRAM is free (the scene was already resolved out); in the recomp it maps to
 // the live framebuffer host target, so the clear blacks the whole frame for that
 // effect's frame(s). Returning true makes the hook skip the glow block
-// (0x82573A54 -> 0x82573AC8, the game's own "a34 == 0" merge point), dropping
+// (0x825574BC -> 0x82557528, the game's own "a34 == 0" merge point), dropping
 // only the glow so the scene + the rest of the overlay render normally.
 //
 // On by default because the effect is broken here (blacks the frame). Turn off to
@@ -189,10 +189,10 @@ bool disable_particles_draw1() { return REXCVAR_GET(disable_particles); }
 bool disable_particles_draw2() { return REXCVAR_GET(disable_particles); }
 bool disable_particles_draw3() { return REXCVAR_GET(disable_particles); }
 
-void Infinite_fuel_and_ammo() {
-    if (REXCVAR_GET(infinite_fuel_and_ammo)) {
-        return;
-    }
+// banjo-nx (2026-10-29, title update 3, from reNut upstream ab60251): true makes the fuel/ammo use return before it
+// takes anything (the hook's return_on_true; the base's `return = true` returned whatever the setting said).
+bool Infinite_fuel_and_ammo() {
+    return REXCVAR_GET(infinite_fuel_and_ammo);
 }
 
 bool Infinite_health() {
@@ -228,13 +228,13 @@ bool BanjoActorOverride(PPCRegister& r3, PPCRegister& r5) {
     const auto& skin = REXCVAR_GET(banjo_skin);
 
     if (skin == "robot") {
-        r3.u32 = 0x8216B690;  // "robotbanjo_actor"
+        r3.u32 = 0x82148098;  // "robotbanjo_actor"
         r5.u32 = 0;
         return false;
     }
 
     if (skin == "tuxedo") {
-        r3.u32 = 0x8216B6A4;  // "tuxedobanjo_actor"
+        r3.u32 = 0x821480AC;  // "tuxedobanjo_actor"
         r5.u32 = 0;
         return false;
     }
@@ -243,9 +243,9 @@ bool BanjoActorOverride(PPCRegister& r3, PPCRegister& r5) {
     return true;
 }
 
-void Max_Acquired_Parts_Access_hook_1(PPCRegister& r7) {
+void Max_Acquired_Parts_Access_hook_1(PPCRegister& r11) {  // title update 3: r11 (the base's r7)
     if (REXCVAR_GET(max_acquired_parts_access)) {
-        r7.u32 = 255;
+        r11.u32 = 255;
     }
 }
 
@@ -255,17 +255,17 @@ void Max_Acquired_Parts_Access_hook_2(PPCRegister& r10) {
     }
 }
 
-void Max_Acquired_Parts_Access_hook_3(PPCRegister& r9) {
+void Max_Acquired_Parts_Access_hook_3(PPCRegister& r11) {  // title update 3: r11 (the base's r9)
     if (REXCVAR_GET(max_acquired_parts_access)) {
-        r9.u32 = 255;
+        r11.u32 = 255;
     }
 }
 
 // =============================================================================
 // banjo-nx: one tile instead of predicated tiling.
 //
-// sub_8222A990 returns how many tiles the frame is drawn in, from the AA mode (0x82F9EB30 + 180) and the video
-// mode (+232); its 15 callers, sub_82278C08's BeginTiling setup among them, size and place each tile from it.
+// sub_821F99C0 returns how many tiles the frame is drawn in, from the AA mode (0x82E0BC90 + 180) and the video
+// mode (+232); its 15 callers, sub_82246AF0's BeginTiling setup among them, size and place each tile from it.
 // With 2x MSAA a 1280x720 scene does not fit the Xbox 360's 10 MB of EDRAM, so the game splits it (two tiles,
 // each pass replayed per tile under SET_BIN_MASK/SELECT predication). Without MSAA (disable_msaa) colour + depth
 // take 7.4 MB and fit in one: returning 1 makes the engine draw the frame once, with no predication.
@@ -277,9 +277,9 @@ REXCVAR_DEFINE_BOOL(single_tile, false, "Nuts&Bolts/Graphics",
                     "Experimental: with disable_msaa, draw the frame as one tile instead of predicated tiling. "
                     "Breaks the post-process EDRAM layout (bands at the top and bottom of the screen).");
 
-REX_EXTERN(__imp__sub_8222A990);
-REX_HOOK_RAW(sub_8222A990) {
-  __imp__sub_8222A990(ctx, base);
+REX_EXTERN(__imp__sub_821F99C0);
+REX_HOOK_RAW(sub_821F99C0) {
+  __imp__sub_821F99C0(ctx, base);
   if (REXCVAR_GET(single_tile) && REXCVAR_GET(disable_msaa) && ctx.r3.u32 > 1) {
     ctx.r3.u64 = 1;
   }

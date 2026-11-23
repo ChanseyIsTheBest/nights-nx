@@ -12,7 +12,7 @@ and, for each named function of the reference game, ranks SA2's functions: a sho
 histogram, then difflib's ratio on the token sequences.
 
   python tools/d3d_match.py --ref-image out/banjo_image.bin --ref-gen <banjo generated/default> \
-      --ref-names <renut_gpu_funcs.toml> [--image out/renut_image.bin] [--gen app/generated/default]
+      --ref-names <renut_gpu_funcs.toml> [--image out/default_image.bin] [--gen app/generated/default]
 """
 import argparse
 import collections
@@ -79,7 +79,7 @@ def main():
     ap.add_argument('--ref-image', required=True)
     ap.add_argument('--ref-gen', required=True)
     ap.add_argument('--ref-names', required=True, help='toml with "0xADDR = { name = ... }" lines')
-    ap.add_argument('--image', default=os.path.join(ROOT, 'out', 'renut_image.bin'))
+    ap.add_argument('--image', default=os.path.join(ROOT, 'out', 'default_image.bin'))
     ap.add_argument('--gen', default=os.path.join(ROOT, 'app', 'generated', 'default'))
     ap.add_argument('--shortlist', type=int, default=60)
     a = ap.parse_args()

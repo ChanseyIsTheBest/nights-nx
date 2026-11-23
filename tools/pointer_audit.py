@@ -20,7 +20,7 @@ from one module into the other. Most hits are not callable pointers, so it sorts
   python tools/pointer_audit.py --module dll            the stage DLL
   python tools/pointer_audit.py --module dll -v         also list the 'other' hits
 
-Needs the image dumps written by codegen with REXGLUE_DUMP_IMAGE=out/renut_image.bin (the DLL goes to
+Needs the image dumps written by codegen with REXGLUE_DUMP_IMAGE=out/default_image.bin (the DLL goes to
 out/default_image.Data_DLL.bin) and the generated trees.
 """
 import argparse
@@ -38,8 +38,8 @@ import switch_check as sc  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODULES = {
     # name: (image dump, base, code range lo, hi, gen dir). Peggle 2 has one module (REX_CODE_BASE/SIZE of the
-    # generated zumasrevenge_pch.h); a guest DLL would get its own entry here.
-    'default': ('out/renut_image.bin', 0x82000000, 0x82140000, 0x828AF6A8, 'app/generated/default'),
+    # generated peggle2_pch.h); a guest DLL would get its own entry here.
+    'default': ('out/default_image.bin', 0x82000000, 0x82140000, 0x828AF6A8, 'app/generated/default'),
 }
 
 

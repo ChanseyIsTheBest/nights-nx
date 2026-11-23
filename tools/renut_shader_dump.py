@@ -7,7 +7,7 @@ XXH3 of header + physical block, as D3DDevice_Create*Shader receives them):
   - the decrypted executable image (out/default_image.bin, written by the code generator): containers compiled into
     the executable are stored whole there (magic 0x102A11xx, low bit 1 = vertex shader). The scan is Renut's
     dump_shaders.py find_shader_headers;
-  - containers a run dumped (zumasrevenge_dump_shaders = true writes <exe folder>/shaders/*.bin at Create*Shader; Renut's
+  - containers a run dumped (peggle2_dump_shaders = true writes <exe folder>/shaders/*.bin at Create*Shader; Renut's
     renderer's own capture folder, shader_capture/, holds the ones its cache lacked): copied as they are.
 
   python tools/renut_shader_dump.py --image out/default_image.bin --dumps out/pc/shaders out/pc/shader_capture
@@ -24,11 +24,12 @@ import xxhash
 SHADER_MAGIC = re.compile(rb"\x10\x2a\x11", re.S)
 
 
-def find_shader_headers(data):
+def find_shader_headers(data, aligned=True):
+    """aligned=False for data files that pack containers at any byte (Beautiful Katamari's models)."""
     hdrs = []
     for m in SHADER_MAGIC.finditer(data):
         o = m.start()
-        if o % 4 or o + 0x24 > len(data):
+        if (aligned and o % 4) or o + 0x24 > len(data):
             continue
         virt, phys = struct.unpack_from(">II", data, o + 4)
         ct, dt, so = struct.unpack_from(">III", data, o + 0x10)
@@ -48,9 +49,6 @@ def main():
     ap.add_argument('--image', required=True)
     ap.add_argument('--dumps', nargs='*', default=[])
     ap.add_argument('--out', required=True)
-    # nights-nx: folders of whole containers as the game loads them from its data (NiGHTS's shader/xbox 360/*.wvu /
-    # *.wpu: magic 0x102A11xx, header + physical block, passed to Create*Shader as they are).
-    ap.add_argument('--files', nargs='*', default=[])
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     image = open(a.image, 'rb').read()
@@ -66,19 +64,6 @@ def main():
         if not os.path.exists(path):
             open(path, 'wb').write(blob)
         found[kind] += 1
-    from_files = 0
-    for folder in a.files:
-        for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
-            blob = open(os.path.join(folder, name), 'rb').read()
-            if len(blob) < 0x24 or blob[:3] != b'*':
-                continue
-            virt, phys = struct.unpack_from('>II', blob, 4)
-            blob = blob[:virt + phys]
-            kind = 'vs' if blob[3] & 1 else 'ps'
-            path = os.path.join(a.out, '%s_%s.bin' % (kind, xxhash.xxh3_64_hexdigest(blob)))
-            if not os.path.exists(path):
-                open(path, 'wb').write(blob)
-            from_files += 1
     copied = 0
     for folder in a.dumps:
         if not os.path.isdir(folder):
@@ -90,8 +75,8 @@ def main():
                     open(dst, 'wb').write(open(os.path.join(folder, name), 'rb').read())
                     copied += 1
     total = len([n for n in os.listdir(a.out) if n.endswith('.bin')])
-    print('renut_shader_dump: %d vertex and %d pixel shader containers in the image; %d from data files; %d copied '
-          'from run dumps; %d in %s' % (found['vs'], found['ps'], from_files, copied, total, a.out))
+    print('renut_shader_dump: %d vertex and %d pixel shader containers in the image; %d copied from run dumps; %d in %s'
+          % (found['vs'], found['ps'], copied, total, a.out))
 
 
 if __name__ == '__main__':

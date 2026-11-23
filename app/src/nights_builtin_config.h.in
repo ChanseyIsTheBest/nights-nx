@@ -5,5 +5,5 @@
 //                         none (src/renut_app.h, DefaultConfigFile).
 #pragma once
 
-inline constexpr char kNightsBuiltInConfig[] = R"NIGHTSCONFIG(@NIGHTS_BUILTIN_CONFIG@)NIGHTSCONFIG";
-inline constexpr char kNightsPlayerConfig[] = R"NIGHTSCONFIG(@NIGHTS_PLAYER_CONFIG@)NIGHTSCONFIG";
+inline constexpr char kNightsBuiltInConfig[] = R"NIGHTSCONFIG(@NIGHTS_BUILTIN_CONFIG_TEXT@)NIGHTSCONFIG";
+inline constexpr char kNightsPlayerConfig[] = R"NIGHTSCONFIG(@NIGHTS_PLAYER_CONFIG_TEXT@)NIGHTSCONFIG";

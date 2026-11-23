@@ -23,32 +23,32 @@
 // -----------------------------------------------------------------------------
 // Guest globals / constants
 // -----------------------------------------------------------------------------
-static constexpr uint32_t kItemCount = 0x82FA32F4;  // dword_82FA32F4 (content row count, BE)
+static constexpr uint32_t kItemCount = 0x82E1048C;  // dword_82FA32F4 (content row count, BE)
 
-// XUI item struct offsets (from sub_823E4A38): +8 = wide text buffer,
+// XUI item struct offsets (from sub_823B2798): +8 = wide text buffer,
 // +268 = flag, +272 = wcslen.
 static constexpr uint32_t kItemTextOff = 8;
 static constexpr uint32_t kItemFlagOff = 268;
 static constexpr uint32_t kItemLenOff = 272;
 
-// Pause-menu object field offsets used by the dispatch guard (from sub_825A8D68).
+// Pause-menu object field offsets used by the dispatch guard (from sub_8258E008).
 static constexpr uint32_t kMenuListOff = 284;   // *(a1+284) = list container handle
 static constexpr uint32_t kMenuList2Off = 248;  // *(a1+248) = alternate source handle
-// Dpad nav message sources (from sub_825A76E0 / sub_825A6DB8 "leftButton"/"rightButton").
+// Dpad nav message sources (from sub_8258C948 / sub_8258C010 "leftButton"/"rightButton").
 static constexpr uint32_t kPauseLeftMsgOff = 264;   // *(a1+264) = dpad-left ("leftButton")
 static constexpr uint32_t kPauseRightMsgOff = 268;  // *(a1+268) = dpad-right ("rightButton")
 
 // ---- Section (tab strip) --------------------------------------------------
 // The pause screen is one XUI scene with a data-driven tab strip:
 //   dword_82FA32C4[] = visible section ids, dword_82FA32C0 = count
-//   sub_825A6708 builds the strip; sub_825A8110 sets each tab's icon
+//   sub_8258B948 builds the strip; sub_8258D3A8 sets each tab's icon
 //   (off_82E51538[2*id]); sub_825A7CF0 sets the selected section's title text
-//   (off_82E5153C[2*id]); sub_825A7D90(obj,mode) switches sections (mode = id,
+//   (off_82E5153C[2*id]); sub_8258D038(obj,mode) switches sections (mode = id,
 //   jump table bounded mode<=7).
 // We add a synthetic section id 8 = "reNut Settings" whose content is the cvar
 // list. The game only ever uses ids 0..7.
-static constexpr uint32_t kSectionArray = 0x82FA32C4;  // dword_82FA32C4[] (BE)
-static constexpr uint32_t kSectionCount = 0x82FA32C0;  // dword_82FA32C0   (BE)
+static constexpr uint32_t kSectionArray = 0x82E1045C;  // dword_82FA32C4[] (BE)
+static constexpr uint32_t kSectionCount = 0x82E10458;  // dword_82FA32C0   (BE)
 static constexpr uint32_t kGuestSectionMax = 12;       // room before dword_82FA32F4
 static constexpr uint32_t kSectionRenut = 8;           // our synthetic section id
 static constexpr uint32_t kSectionTitleElemOff = 196;  // *(a1+196) = title text element
@@ -58,23 +58,25 @@ static constexpr uint32_t kPauseModeField = 440;       // *(a1+0x1B8) = active s
 // rexglue texture replacer can swap it to give our tab a custom icon without
 // affecting anything else.
 static constexpr uint32_t kSectionIconBorrow = 3;
+// banjo-nx (2026-10-29): the reNut Settings tab on title update 3, off until it is ported (pauseSection_InjectTab).
+static constexpr bool kTuPauseTab = false;
 
 // -----------------------------------------------------------------------------
 // Originals + recompiled helpers we call back into
 // -----------------------------------------------------------------------------
-REX_EXTERN(__imp__sub_825A96C8);  // original item label callback
-REX_EXTERN(__imp__sub_825A8D68);  // original dispatch callback
-REX_EXTERN(__imp__sub_825A7CF0);  // original section title-text setter
-REX_EXTERN(__imp__sub_825A8110);  // original tab icon setter
-REX_EXTERN(__imp__sub_825A7D90);  // original section switch (setMode)
-REX_EXTERN(__imp__sub_825A76E0);  // original pause input handler
+REX_EXTERN(__imp__sub_8258E8F8);  // original item label callback
+REX_EXTERN(__imp__sub_8258E008);  // original dispatch callback
+// REX_EXTERN(__imp__sub_825A7CF0): the section title-text setter, inlined on title update 3 (pauseSection_InjectTab)
+REX_EXTERN(__imp__sub_8258D3A8);  // original tab icon setter
+REX_EXTERN(__imp__sub_8258D038);  // original section switch (setMode)
+REX_EXTERN(__imp__sub_8258C948);  // original pause input handler
 
 // Rebuild the pause list (re-runs the builder, which re-fires our injection hook).
-REX_IMPORT(sub_825A89B0, RenutRebuildPauseMenu, void(uint32_t));
+REX_IMPORT(sub_8258DC38, RenutRebuildPauseMenu, void(uint32_t));
 // Query the currently selected row index of a list container.
-REX_IMPORT(sub_8257AD00, RenutGetCurSel, uint32_t(uint32_t));
+REX_IMPORT(sub_8255E5B0, RenutGetCurSel, uint32_t(uint32_t));
 // Set an XUI text element's text (element handle, guest wide-string ptr).
-REX_IMPORT(sub_829C87A0, RenutSetTitleText, uint32_t(uint32_t, uint32_t));
+REX_IMPORT(sub_82A25780, RenutSetTitleText, uint32_t(uint32_t, uint32_t));
 
 // -----------------------------------------------------------------------------
 // Host-side menu state
@@ -419,7 +421,7 @@ void RenutSaveConfig() {
 
 // =============================================================================
 // Midasm hook: content-row count injection (LABEL_52 of the builder, guest
-// 0x825A8C88). When our section is showing cvars, override the row count with
+// 0x8258DF24). When our section is showing cvars, override the row count with
 // our flattened display-row count; the label/dispatch overrides supply the rest
 // from g_rows. Otherwise leave the game's normal menu untouched.
 // =============================================================================
@@ -432,7 +434,7 @@ void pauseMenu_InjectItems() {
 
 // =============================================================================
 // Midasm hook: cursor restore (builder tail, at the XuiContainerSetCurSel call,
-// guest 0x825A8D18). The game hard-codes selection 0 (li r4,0); when a toggle
+// guest 0x8258DFB4). The game hard-codes selection 0 (li r4,0); when a toggle
 // asked us to preserve the cursor, override r4 with that row index.
 // =============================================================================
 void pauseMenu_RestoreSel(PPCRegister& r4) {
@@ -443,10 +445,10 @@ void pauseMenu_RestoreSel(PPCRegister& r4) {
 }
 
 // =============================================================================
-// Override: per-item label callback (sub_825A96C8)
+// Override: per-item label callback (sub_8258E8F8)
 //   a1 = r3 (context), a2 = r4 (item index), a3 = r5 (item XUI object)
 // =============================================================================
-REX_HOOK_RAW(sub_825A96C8) {
+REX_HOOK_RAW(sub_8258E8F8) {
   const uint32_t index = ctx.r4.u32;
   const uint32_t itemObj = ctx.r5.u32;
 
@@ -458,14 +460,14 @@ REX_HOOK_RAW(sub_825A96C8) {
     return;
   }
 
-  __imp__sub_825A96C8(ctx, base);
+  __imp__sub_8258E8F8(ctx, base);
 }
 
 // =============================================================================
-// Override: selection/dispatch callback (sub_825A8D68)
+// Override: selection/dispatch callback (sub_8258E008)
 //   a1 = r3 (pause object), a2 = r4 (message source), a3 = r5, a4 = r6
 // =============================================================================
-REX_HOOK_RAW(sub_825A8D68) {
+REX_HOOK_RAW(sub_8258E008) {
   const uint32_t pauseObj = ctx.r3.u32;
   const uint32_t source = ctx.r4.u32;
 
@@ -507,7 +509,7 @@ REX_HOOK_RAW(sub_825A8D68) {
     }
   }
 
-  __imp__sub_825A8D68(ctx, base);
+  __imp__sub_8258E008(ctx, base);
 }
 
 // =============================================================================
@@ -528,10 +530,17 @@ void renutCvarMenu_FrameTick() {
 // =============================================================================
 
 // -----------------------------------------------------------------------------
-// Midasm hook: append our section id to the tab strip (end of sub_825A6708,
-// guest 0x825A6B98, right after dword_82FA32C0 is finalized).
+// Midasm hook: append our section id to the tab strip (end of sub_8258B948,
+// guest 0x8258BE00, right after dword_82FA32C0 is finalized).
 // -----------------------------------------------------------------------------
 void pauseSection_InjectTab() {
+  // banjo-nx (2026-10-29, title update 3): the tab is not added on the TU. Its compiler inlined the section title
+  // setter (base sub_825A7CF0) into the strip's two callers, so nothing gives our id 8 its title (the inlined code
+  // would read off_82E5153C[2 * 8], past the game's table), and the pause object's offsets this file uses have not
+  // been checked against the TU's code yet. Every other hook here acts only while our section is showing, so with
+  // no tab they pass straight through. Settings stay in renut.toml.
+  if (kTuPauseTab == false)
+    return;
   REX_PPC_MEMBASE_PTR(membase);
   uint32_t count = ReadGuestBE32(membase, kSectionCount);
   if (count < kGuestSectionMax) {
@@ -541,21 +550,21 @@ void pauseSection_InjectTab() {
 }
 
 // -----------------------------------------------------------------------------
-// Override: tab icon setter (sub_825A8110)
+// Override: tab icon setter (sub_8258D3A8)
 //   a1 = r3, a2 = r4 (tab index), a3 = r5 (tab XUI object)
 // For our section, temporarily borrow section 0's icon (the game-settings gear)
 // so the original code loads a valid, already-preloaded icon.
 // -----------------------------------------------------------------------------
-REX_HOOK_RAW(sub_825A8110) {
+REX_HOOK_RAW(sub_8258D3A8) {
   const uint32_t tabPos = ctx.r4.u32;
   const uint32_t idAddr = kSectionArray + tabPos * 4;
   if (ReadGuestBE32(base, idAddr) == kSectionRenut) {
     WriteGuestBE32(base, idAddr, kSectionIconBorrow);  // town-map icon (unused elsewhere)
-    __imp__sub_825A8110(ctx, base);
+    __imp__sub_8258D3A8(ctx, base);
     WriteGuestBE32(base, idAddr, kSectionRenut);       // restore
     return;
   }
-  __imp__sub_825A8110(ctx, base);
+  __imp__sub_8258D3A8(ctx, base);
 }
 
 // -----------------------------------------------------------------------------
@@ -563,6 +572,7 @@ REX_HOOK_RAW(sub_825A8110) {
 //   a1 = r3 (pause object), a2 = r4 (current tab index)
 // For our section, set the title to "reNut Settings".
 // -----------------------------------------------------------------------------
+#if 0  // banjo-nx (2026-10-29): sub_825A7CF0 does not exist on title update 3 (inlined); see pauseSection_InjectTab.
 REX_HOOK_RAW(sub_825A7CF0) {
   const uint32_t pauseObj = ctx.r3.u32;
   const uint32_t tabPos = ctx.r4.u32;
@@ -583,14 +593,15 @@ REX_HOOK_RAW(sub_825A7CF0) {
   }
   __imp__sub_825A7CF0(ctx, base);
 }
+#endif
 
 // -----------------------------------------------------------------------------
-// Override: section switch / setMode (sub_825A7D90)
+// Override: section switch / setMode (sub_8258D038)
 //   a1 = r3 (pause object), a2 = r4 (section id / mode)
 // Selecting our section builds the cvar list as its content; leaving it clears
 // cvar display so the real section builders run normally.
 // -----------------------------------------------------------------------------
-REX_HOOK_RAW(sub_825A7D90) {
+REX_HOOK_RAW(sub_8258D038) {
   const uint32_t pauseObj = ctx.r3.u32;
   const uint32_t mode = ctx.r4.u32;
 
@@ -598,26 +609,26 @@ REX_HOOK_RAW(sub_825A7D90) {
     SnapshotCvars();
     g_cvarMenuOpen = true;
     g_restoreSel = -1;
-    __imp__sub_825A7D90(ctx, base);  // housekeeping (mode>7 falls through, stores mode)
+    __imp__sub_8258D038(ctx, base);  // housekeeping (mode>7 falls through, stores mode)
     rex::CallFrame frame{ctx};
     RenutRebuildPauseMenu(frame, base, pauseObj);  // build the cvar list into the content list
     return;
   }
 
   g_cvarMenuOpen = false;  // a normal section owns the content list again
-  __imp__sub_825A7D90(ctx, base);
+  __imp__sub_8258D038(ctx, base);
 }
 
 // -----------------------------------------------------------------------------
-// Override: pause input handler (sub_825A76E0)
+// Override: pause input handler (sub_8258C948)
 //   a1 = r3 (pause object)
 // Its "activate content item" dispatch is a jump table bounded to modes 0..7
-// (mode 0 -> sub_825A8D68). In our section (mode 8) A-press is dropped, so cvars
+// (mode 0 -> sub_8258E008). In our section (mode 8) A-press is dropped, so cvars
 // never toggle. While our section is active, present mode 0 for the duration of
-// the call so "activate" routes to sub_825A8D68 (our toggle). We restore mode 8
+// the call so "activate" routes to sub_8258E008 (our toggle). We restore mode 8
 // afterward unless the call itself switched sections (LEFT/RIGHT nav).
 // -----------------------------------------------------------------------------
-REX_HOOK_RAW(sub_825A76E0) {
+REX_HOOK_RAW(sub_8258C948) {
   const uint32_t pauseObj = ctx.r3.u32;
   const uint32_t source = ctx.r4.u32;
   const uint32_t modeAddr = pauseObj + kPauseModeField;
@@ -664,11 +675,11 @@ REX_HOOK_RAW(sub_825A76E0) {
   }
 
   if (inRenut) {
-    WriteGuestBE32(base, modeAddr, 0);  // route activate -> sub_825A8D68
-    __imp__sub_825A76E0(ctx, base);
+    WriteGuestBE32(base, modeAddr, 0);  // route activate -> sub_8258E008
+    __imp__sub_8258C948(ctx, base);
     if (ReadGuestBE32(base, modeAddr) == 0)  // call didn't switch sections
       WriteGuestBE32(base, modeAddr, kSectionRenut);
     return;
   }
-  __imp__sub_825A76E0(ctx, base);
+  __imp__sub_8258C948(ctx, base);
 }

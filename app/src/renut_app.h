@@ -4,10 +4,6 @@
 #include <rex/filesystem.h>
 #include <rex/platform.h>
 #include <rex/rex_app.h>
-#include "nights_language.h"  // nights-nx (2026-10-29): renut.toml "language"
-#if defined(NIGHTS_BUILTIN_CONFIG)
-#include "nights_builtin_config.h"  // generated from app/nights_switch_defaults.toml (CMake)
-#endif
 #include "renut_engine/overlays/fps_overlay_dialog.h"
 #include "renut_engine/renut_logging.h"
 #include "renut_engine/overlays/renut_logging_overlay.h"
@@ -19,9 +15,13 @@
 #include "renut_engine/Timer.h"
 #include "renut_engine/Fps.h"
 #include "renut_engine/hooks.h"
+// katamari-nx: N&B's title update is not part of this port (Beautiful Katamari has no title update in the user's
+// files). The DLC installer is (2026-10-31, the user's 16 DLC packages): reNut upstream's, game-agnostic.
+#include "renut_engine/dlc_install.h"
 #include "profiler/profiler.h"
 #include "profiler/profiler_overlay.h"
-// nights-nx: banjo-nx's PM4-ring renderer (src/me) is N&B-only and not built (app/CMakeLists.txt NIGHTS_NB_SOURCES).
+#include "game_menu.h"  // blur-nx (2026-11-18): the game menu (A+B+X+Y+L+R, F8)
+#include "me/me_native_system.h"
 // banjo-nx (2026-10-16): Renut's Direct3D-level renderer, the boot choice banjo_renderer = "renut"
 // (app/src/renut_engine/gpu, tools/renut_gpu_import.py, docs/renut-renderer-port.md).
 #if BANJO_RENUT_RENDERER
@@ -30,6 +30,15 @@
 #include "renut_engine/gpu/banjo_renut_capture.h"
 #endif
 #include "cpu/banjo_enhancements.h"
+#if defined(NIGHTS_BUILTIN_CONFIG)
+#include "nights_builtin_config.h"  // generated from app/nights_switch_defaults.toml and nights_switch.toml (CMake)
+#endif
+namespace nights::menu {
+void InstallMenuRows();  // nights-nx (2026-11-22): NiGHTS's rows on the game menu (src/nights_menu.cpp)
+}
+namespace blur::small_alloc {
+void Enable();  // blur-nx (2026-11-17, #220; renut-ultimate port 151): src/blur_small_alloc.cpp, after setup
+}
 #include "native/nfsmw_nativo_captura.h"
 #if !REX_PLATFORM_SWITCH
 #include "profiler/nfsmw_perfil_pc.h"
@@ -57,6 +66,8 @@ void RexSwitchApmApply(void);
 }
 #endif
 
+extern "C" const char* RexAppBuildStamp(void);  // port 193 (TFU-nx's): src/build_stamp.cpp
+
 class RenutApp : public rex::ReXApp {
 public:
     RenutApp(rex::ui::WindowedAppContext& ctx, std::string_view name, rex::PPCImageInfo info)
@@ -64,7 +75,28 @@ public:
 
     static std::unique_ptr<rex::ui::WindowedApp> Create(
         rex::ui::WindowedAppContext& ctx) {
+        // katamari-nx: banjo-nx's name, so its config is renut.toml. nights-nx: the player's file of 1.0.2 is renut.toml
+        // next to the NRO, so the name stays and a 1.0.2 install keeps its settings.
         return std::unique_ptr<RenutApp>(new RenutApp(ctx, "renut", PPCImageConfig));
+    }
+
+    // nights-nx (2026-10-29, sa2-nx's design; the user: only the controls, the language and SMAA in the toml): the Switch
+    // build's release settings, compiled in (app/nights_switch_defaults.toml) and applied before renut.toml, which holds
+    // only the player's options (a key added there still overrides these: test runs).
+    std::string_view BuiltInConfig() const override {
+#if defined(NIGHTS_BUILTIN_CONFIG)
+        return kNightsBuiltInConfig;
+#else
+        return {};
+#endif
+    }
+    // Without a renut.toml next to the NRO, the player's default one is written there (app/nights_switch.toml).
+    std::string_view DefaultConfigFile() const override {
+#if defined(NIGHTS_BUILTIN_CONFIG)
+        return kNightsPlayerConfig;
+#else
+        return {};
+#endif
     }
 
 
@@ -82,16 +114,33 @@ public:
     //     rex::cvar::LoadConfig("renut.toml");
     // }
 
+    // blur-nx (2026-11-18): the game menu's fonts (the console's own shared font) in the SDK drawer's atlas.
+    void OnConfigureFonts(ImFontAtlas* atlas) override { blur::AddGameMenuFonts(atlas); }
+
     void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+#if BANJO_RENUT_RENDERER
+        // katamari-nx (2026-11-01): the app's dialogs draw with the ImGui inside this executable, whose context only
+        // Renut's overlay drawer creates; under the SDK's presenter (banjo_renderer = "emulated") they would draw into
+        // no context at all. The emulated GPU is a reference image: no overlays.
+        if (!banjo::renut_gpu::Active()) return;
+#endif
         //drawer->AddDialog(new FpsOverlayDialog(drawer));
         fps_dialog_ = std::make_unique<FpsOverlayDialog>(drawer);
         fps_dialog_->fpsManager = &fpsManager;
         fpsManager.showFPS = REXCVAR_GET(banjo_show_fps);  // banjo-nx (2026-10-21)
+        fpsManager.GetCreateCounter("Shown");  // port 196 (S4ep1-nx's): made here, before the display thread ticks it
         drawer->AddDialog(fps_dialog_.get());
         drawer->AddDialog(new RenuLogOverlayDialog(drawer));
         // CPU/GPU profiler window ported from UnleashedRecomp (F5 / banjo_show_profiler).
         profiler_dialog_ = std::make_unique<ProfilerOverlayDialog>(drawer);
         drawer->AddDialog(profiler_dialog_.get());
+        // blur-nx (2026-11-18, the user's request): the game menu. Attached for good (its constructor adds it), it
+        // asks for no ImGui frame while closed (WantsFrame), so the drawer builds none for it then.
+        // nights-nx (2026-11-22, the user: "turn on the in game menu and add rumble as an option from it"): NiGHTS's
+        // rows on its Settings tab (src/nights_menu.cpp), set before the menu is first drawn.
+        nights::menu::InstallMenuRows();
+        game_menu_ = std::make_unique<blur::GameMenuDialog>(drawer, config_path(), [this] { return runtime(); },
+                                                            [this] { return immediate_drawer(); });
 #if !REX_PLATFORM_SWITCH
         path_wizard_ = new PathSetupWizard(drawer);
         drawer->AddDialog(path_wizard_);
@@ -154,7 +203,10 @@ public:
             return;
         }
 #endif
-        // nights-nx: without Renut's renderer the SDK's emulated Xenos GPU draws (the ring renderer is N&B-only).
+        if (me::native::Enabled()) {
+            config.graphics = me::native::CreateGraphicsSystem();
+            banjo::profiler::SetRendererInfo("Native Vulkan (PM4 ring)", "");
+        }
     }
 
 #if BANJO_RENUT_RENDERER
@@ -177,6 +229,13 @@ public:
 #endif
 
     void OnPostSetup() override {
+        REXLOG_INFO("[build] {}", RexAppBuildStamp());  // port 193 (TFU-nx's): ties this log to its build
+        // blur-nx (2026-11-17, #220; renut-ultimate port 151): the small-block arena, blur_small_alloc_mb (32 MB by
+        // default, Blur's size; 0 in a game's toml turns it off). Before the DLC install, as Blur has it.
+        blur::small_alloc::Enable();
+        // katamari-nx (2026-10-31): DLC packages in the "dlc" folder next to the NRO / exe installed before the game
+        // starts (reNut upstream's installer, renut_engine/dlc_install.cpp, as banjo-nx does).
+        renut::dlc::InstallPackages(runtime());
         // One log line with every enhancement and whether it is active (src/cpu/banjo_enhancements.h).
         banjo::LogEnhancements();
         // PC: function-level CPU profile (banjo_pc_profile_s = N seconds per report; 0 = off; from futari-nx).
@@ -223,42 +282,19 @@ public:
         banjo::pgo::Stop();
     }
 
-    // nights-nx (2026-10-29, the user: "the only thing I want in the .toml by default is" the controls, the language
-    // and SMAA; sa2-nx's built-in config): the Switch build's release settings compiled in (app/nights_switch_
-    // defaults.toml, written by tools/make_nights_tomls.py); renut.toml next to the NRO overrides them key by key.
-    std::string_view BuiltInConfig() const override {
-#if defined(NIGHTS_BUILTIN_CONFIG)
-        return kNightsBuiltInConfig;
-#else
-        return {};
-#endif
-    }
-    // Without a renut.toml next to the NRO, the player's default one is written there (app/nights_switch.toml).
-    std::string_view DefaultConfigFile() const override {
-#if defined(NIGHTS_BUILTIN_CONFIG)
-        return kNightsPlayerConfig;
-#else
-        return {};
-#endif
-    }
-
-    // The game's language (renut.toml "language"; auto = the system language): before the game asks for it.
-    void OnPostInitLogging() override {
-        nights::language::Apply();
-    }
-
     // A game_root folder next to the executable is used when no path was given.
-    // On the Switch that is sdmc:/switch/nights-nx/game_root (the extracted package).
+    // On the Switch that is sdmc:/switch/nights-nx/game_root (the extracted package). nights-nx: the player's settings
+    // file stays renut.toml (1.0.2's), not a file of its own as Katamari's katamari.toml.
     void OnConfigurePaths(rex::PathConfig& paths) override {
-        if (!paths.game_data_root.empty()) {
-            return;
+        if (paths.game_data_root.empty()) {
+            const auto folder = rex::filesystem::GetExecutableFolder();
+            std::error_code ec;
+            const auto extracted = folder / "game_root";
+            if (!folder.empty() && std::filesystem::is_directory(extracted, ec)) {
+                paths.game_data_root = extracted;
+            }
         }
-        const auto folder = rex::filesystem::GetExecutableFolder();
-        std::error_code ec;
-        const auto extracted = folder / "game_root";
-        if (!folder.empty() && std::filesystem::is_directory(extracted, ec)) {
-            paths.game_data_root = extracted;
-        }
+        renut::dlc::SetUserDataRoot(paths.user_data_root);  // the folder the DLC installer checks for installed ones
     }
 
 #if !REX_PLATFORM_SWITCH
@@ -267,7 +303,22 @@ public:
         std::function<void(rex::PathConfig)> resume) override
     {
         StartRenutRenderer();
+        // renut-ultimate (port 69, 2026-11-10, blur-nx): with no saved paths, a game folder given on the command line or
+        // in the toml (or the game_root next to the executable) that holds default.xex is used as given, with no wizard.
+        // Before, a new port's first PC run waited for a click on the path dialog, which looked like a hang right after
+        // the swapchain was made. Saved paths still come first, as the wizard takes them (a player's own folders).
+        std::error_code given_ec;
+        const bool given = !defaults.game_data_root.empty() &&
+                           std::filesystem::is_regular_file(defaults.game_data_root / "default.xex", given_ec) &&
+                           !PathConfigStore::TryLoad(app_name_);
+        if (!path_wizard_ || given) {
+            // katamari-nx (2026-11-01): banjo_renderer = "emulated" creates no app dialogs (OnCreateDialogs), so no
+            // wizard: the paths as given (the command line / the toml).
+            renut::dlc::SetUserDataRoot(defaults.user_data_root);
+            return rex::ReXApp::OnFinalizePaths(defaults, std::move(resume));
+        }
         path_wizard_->Init(app_name_, defaults, [resume](rex::PathConfig resolved) {
+            renut::dlc::SetUserDataRoot(resolved.user_data_root);
             resume(resolved);
             });
         return std::nullopt;
@@ -290,4 +341,5 @@ private:
 #endif
     std::unique_ptr<FpsOverlayDialog> fps_dialog_;
     std::unique_ptr<ProfilerOverlayDialog> profiler_dialog_;
+    std::unique_ptr<blur::GameMenuDialog> game_menu_;  // blur-nx (2026-11-18)
 };

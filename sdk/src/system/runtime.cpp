@@ -35,6 +35,11 @@ REXCVAR_DEFINE_STRING(cache_root, "", "Runtime", "Override shader cache path");
 REXCVAR_DEFINE_STRING(metadata_root, "", "Runtime", "Override metadata path");
 
 namespace rex {
+#if defined(__SWITCH__)
+namespace filesystem {
+void SetReadOnlyGameRoot(const std::filesystem::path& root);  // core/filesystem_posix.cpp (port 203)
+}  // namespace filesystem
+#endif
 
 // Static instance for global access
 Runtime* Runtime::instance_ = nullptr;
@@ -316,6 +321,10 @@ bool Runtime::SetupVfs() {
     return false;
   }
   REXSYS_DEBUG("  Mounted {} at {}", abs_game_root.string(), mount_path);
+#if defined(__SWITCH__)
+  // Port 203: the game's own files keep a descriptor per read-only handle (filesystem_shared_handles).
+  rex::filesystem::SetReadOnlyGameRoot(abs_game_root);
+#endif
 
   // Register symbolic links for game: and D:
   file_system_->RegisterSymbolicLink("game:", mount_path);
@@ -331,6 +340,9 @@ bool Runtime::SetupVfs() {
           std::make_unique<rex::filesystem::HostPathDevice>(update_mount, abs_update_root, true);
       if (update_device->Initialize() && file_system_->RegisterDevice(std::move(update_device))) {
         file_system_->RegisterSymbolicLink("update:", update_mount);
+#if defined(__SWITCH__)
+        rex::filesystem::SetReadOnlyGameRoot(abs_update_root);  // port 203: a read-only device's files
+#endif
         REXSYS_DEBUG("  Mounted {} at update:", abs_update_root.string());
       }
     }

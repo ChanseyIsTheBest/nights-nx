@@ -1,5 +1,11 @@
 # NiGHTS into Dreams... port: notes
 
+> **Record** (nights-nx `master`, 2026-10-28 to 2026-11-22, on banjo-nx's tree). Since 2026-11-22 the port is on the
+> ultimate base (branch `ultimate`): docs/ultimate-rebase-plan.md says which of the pieces below were grafted and
+> which the base's own forms replaced (list b; for example nights_renut_double_buffer is now
+> pacman_renut_double_buffer, src/nights_dropped_cvars.cpp is src/nights_keys.cpp), and docs/nights-ultimate-notes.md
+> holds what the rebase found. Addresses, offsets and measurements here stay true for the game.
+
 This file records the port: what each step found, with its evidence. The project is a copy of banjo-nx's working tree
 of 2026-10-28 (its HEAD `1889dab6` plus the 41 files it had modified, the 10-28 renderer rounds), taken as the base as
 the user asked. Comments that say "banjo-nx", "peggle2-nx", "zumasrevenge-nx" record findings from those ports.
@@ -444,3 +450,75 @@ paired first). The console decides how slow it really is: Ryujinx's JIT on this 
   `nights_true60_button_codes` (true, in renut.toml) lets the copy read 0 every other call. Not every call: the check
   accepts the newest history slot or the one before, so it would fire twice on consecutive frames.
 - The Switch build keeps the PGO profile taken before this change (one generated line and this hook differ).
+
+## Packed files, H.265 movies and Opus music (2026-11-22)
+
+The user, through the sonic racing session (sasrt-nx's handoff `docs/handoff/media_for_nights_1122/README.md`): "help
+nights into dreams have l4z and zxc in its web isntaller and rencode video and audio to opus and h265", then "also make
+sure nights ZXC compresses its videos", and for the ADX: SA2's way (sa2-nx-ult's hook, not the handoff's ADX
+re-encoding on read). The pieces are other ports', taken into this tree; nights-nx-installer makes the files.
+
+- **LZ4 / ZXC packing**: rr6-nx's `.lz4b` reader as culdcept-nx and sa2-nx-ult have it (`sdk/src/filesystem/lz4_blocks.cpp`,
+  `sdk/thirdparty/lz4` 1.10.0, `sdk/thirdparty/zxc` 0.15.0, the `rexblockcodecs` library): NAME.lz4b is the game's NAME
+  (`host_path_entry.cpp`, and the lazy lookup in `host_path_device.cpp`); a plain NAME beside it wins. The VFS index is
+  culdcept-nx's version 2 (each file's size on the SD and the size a packed one stands for, so a packed folder's index
+  still validates and no start reads every packed header). On the game's files (2,667 of them, 1,093 MB, all but
+  `default.xex(p)`, the movies and the music): LZ4 HC 9 330 MB, ZXC 7 312 MB; ZXC is smaller on the `.ddm` stages
+  (713 -> 144 MB), `.bin` (296 -> 104), `.csb` (62 -> 55) and `.dat`, LZ4 on the tiny `.csa`. The installer's game.json
+  takes ZXC for those four and LZ4 for the rest (311 MB). PC (out/logs, renut_004): the game from a packed copy of the
+  game folder (`D:\nights\test_packed\game_root`: the packed files and the rest hard-linked; renut.cfg's
+  `game_data_root` pointed at it for the run, put back after) to Spring Valley in Sega Saturn Dreams, the ground drawn;
+  no failed open but `cri.txt`.
+- **The music (afs/*.adx) as Opus**: all 214 are CRI ADX encoding 3, stereo, version 4, no encryption (210 at 48 kHz,
+  3 at 44.1, 1 at 11.025), 450 MB / 2.3 h. NiGHTS has ADXT 11.39 (`ADXT/XBOX360 Ver.11.39` in the image) beside CRI
+  Audio 3.57; its ADXB decode step `sub_823BAB70` is instruction for instruction sa2-nx-ult's `sub_828C2948` (ADXT
+  11.35) but for one global's address (mono decoder `sub_823BBE58`, stereo `sub_823BC510`). So sa2-nx-ult's format
+  (`sdk/include/rex/filesystem/adx_opus.h`, `adx_opus.cpp`, `opus_decoder.cpp`) and hook (`app/src/nights_adx_opus.cpp`)
+  apply as they are; libopus is devkitPro's on the Switch. `tools/adx_opus_pack.mjs` (sa2-nx-ult's, with ffmpeg's
+  libopus) made all 214: 450 -> 143 MB at 128 kbit/s, every stream at lag 0, `--check` clean. PC (renut_005, the same
+  route with the .adxo files): the title music (cdda_17) and Spring Valley's (alp_1int, alp_1a, alp_1aa, alp_1b) taken
+  from the .adxo, every decode step from the tags (silence: the PC has no libopus). The `.csb` sound banks (62 MB) are
+  not converted: CRI Audio's, a decoder of its own (next step, if worth it).
+- **The movies are VC-1, not WMV3**: the 22 `afs/*.wmv` (516 MB) are ASF with VC-1 advanced profile (fourcc WVC1,
+  sequence header with start codes; 1280x720 or 640x480, 29.97 fps, B pictures) and WMA Pro audio, where Culdcept's are
+  WMV3 without B pictures. The player and its codec interface are the same XDK library as culdcept-nx's, a later build,
+  found by the shape of its functions: decode `sub_82453B20`, get output `sub_82453B80`, flush `sub_82453A18`, destroy
+  `sub_82453A70`, GetData `sub_82453758`, status to HRESULT `sub_82453678`, the stream node's fetch `sub_82427B40`; V at
+  C+32 with Culdcept's fields (+84 / +88 the sequence header, set by `sub_82453DC0`). Its decoder statuses differ: 0 ok,
+  2 no more output (Culdcept 9), GetData's last chunk 6 (Culdcept 10).
+- **FFmpeg's VC-1 in place of the game's decoder** (`app/src/nights_wmv_ffmpeg.cpp`, culdcept-nx's
+  `culdcept_wmv_ffmpeg.cpp` adapted; `nights_wmv_ffmpeg`, default 1): the SDK's FFmpeg built the VC-1 decoder but its
+  codec list named only WMV3 (`sdk/thirdparty/ffmpeg-overlay/codec_list.c`: `ff_vc1_decoder` added; `config.h` includes
+  `config_masseffect_wmv3.h`). Mode 2 (the game's decoder shown, FFmpeg compared, `nights_wmv_log_calls`) found what the
+  game's decoder shows through this interface: after each frame the newest picture FFmpeg has given (both hold a
+  reference picture back for the B pictures), at a movie's first frame that frame's own picture (FFmpeg gives it only
+  when drained: a decoder of its own, `FirstPicture`), and for a skipped frame (a one-byte payload) no picture at all
+  (S_OK, size 0; the player asks for none). Mode 1 does the same; with `nights_wmv_log_hashes` both modes logged a hash
+  of every picture shown: the first 100 s (four movies: 120, 135, 1,244 and 401 pictures) identical picture for picture
+  and time for time (out/logs renut_009 / renut_010), so FFmpeg is the default. FFmpeg on the PC: about 3 ms a 640x480
+  frame. The console's cost of the software VC-1 decode is not measured.
+- **The H.265 movies**: the installer writes, in each non-skipped frame's place, an H.265 picture of exactly what the
+  game's decoder would show for it (the rule above, in its `lib/movies.js` with FFmpeg's VC-1 decoder in WebAssembly),
+  skipped frames kept as they are, then packs the file as ZXC blocks (NAME.wmv.lz4b). The hook sends a movie whose
+  first frame is H.265 to nxvideo (culdcept-nx's `tools/switch/nxvideo`, FFmpeg 7.1 with nvtegra, NVDEC; the CMake
+  block `NIGHTS_NXVIDEO`), which gives each picture as its frame comes (no reordering), and answers a skipped frame with
+  no picture without giving it to nxvideo. The PC has no H.265 decoder (such a movie is not shown there).
+- **The installer's side, checked on the PC** (nights-nx-installer 082b647): its pictures (wasm/vc1, `lib/movies.js`)
+  hash the same as the game's decoder's in renut_009 (SEGA_HD 120/120, SONIC 135/135, PS2_M01 1,244/1,244); the ASF
+  rewrite (culdcept's writer: not byte for byte NiGHTS's muxer, a few % smaller) plays the same pictures at the same
+  times with the game's decoder (renut_011); the built-in browser's WebCodecs H.265 (SEGA_HD 1.2 -> 0.39 MB, 44.6 dB;
+  SONIC with its skipped frame, 50.7 dB) and Opus (dreams.adx 17.6 -> 5.3 MB, `adx_opus_pack.mjs --check` clean).
+  On the PC the ZXC-packed H.265 movies open (NAME.wmv.lz4b), are taken for H.265 and played through (no pictures:
+  no decoder there). ZXC on the H.265 movies saves 1-16 %.
+- **A movie without a decoder held the game** (PC, `D:\nights\test_full\game_root`, renut_014): the PC's H.265 movies,
+  answered "no picture" frame after frame, ran through in an instant, and the title's looping movie then held the game
+  (no frame drawn after it started; the music went on). Such a movie (the PC, or nxvideo not opening on the Switch) now
+  shows black pictures at its own times. renut_015: the whole folder (everything packed, the music as Opus, the 22
+  movies as ZXC-packed H.265) from the intro to Sega Saturn Dreams' gameplay, the title and stage music from the .adxo,
+  no failed open but `cri.txt`.
+- **For the console** (not yet run): the full NRO `dist/package/nights-nx_test_1122/nights-nx.nro` (switch-pgo-use, the
+  old PGO profile; md5 10983ecd...) and `D:\nights\test_full\game_root` (as the installer makes it: 2,667 files packed,
+  214 .adxo, 22 H.265 movies as .wmv.lz4b, made with ffmpeg's libx265 and libopus in place of the browser's encoders),
+  in place of the SD's `game_root` (a plain NAME next to NAME.lz4b or NAME.adxo wins, so the old folder has to go). To
+  look at: the intro's logos and the attract movies (NVDEC), the title and stage music (Opus), load times, the log's
+  `[wmv]`, `[adxo]` and `[lz4b]` lines.

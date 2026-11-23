@@ -13,7 +13,7 @@ rem MSVC runtime named by the object.
 set "CXX=%LLVM_BIN%/clang++.exe --target=x86_64-pc-windows-msvc -O2 -std=c++23 -ffp-contract=off -march=x86-64-v2 -D_DLL -D_MT -Xclang --dependent-lib=msvcrt -nostartfiles -nostdlib -fuse-ld=lld-link -lkernel32.lib -loldnames.lib"
 set "INC=-Isdk/include -Isdk/thirdparty/simde -Isdk/thirdparty/simde/simde -Iapp/out/pc-me/rexglue-sdk/include"
 set FAILED=0
-for %%T in (fp_any_mode_test rotate_word_test signal_skip_idle_test vec_byteswap_test vmx_helpers_neon_test vmx_small_helpers_test neon_shuffles_test fcti_copy_test float_loads_test vec_unaligned_test memcalls_test fp_sign_ops_test single_floats_test pmull_fingerprint_test) do (
+for %%T in (fp_any_mode_test rotate_word_test signal_skip_idle_test vec_byteswap_test vmx_helpers_neon_test vmx_small_helpers_test neon_shuffles_test fcti_copy_test float_loads_test vec_unaligned_test memcalls_test fp_sign_ops_test single_floats_test pmull_fingerprint_test vec_lane_test) do (
   set "RUN=1"
   if not "%~1"=="" (echo %%T | findstr /i "%~1" >nul || set "RUN=0")
   if "!RUN!"=="1" (

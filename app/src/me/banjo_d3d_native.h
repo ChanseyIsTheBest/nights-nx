@@ -100,14 +100,14 @@ REXCVAR_DECLARE(int32_t, banjo_hot_guard_period);
 
 // Direct3D's own code the native path calls. Hooked ones through their hooks (the shader load: the renderer notes the
 // shader objects there; the three writers: their hand-written natives), the others directly.
-REX_EXTERN(sub_8222BF10);
-REX_EXTERN(sub_8222CB90);
-REX_EXTERN(sub_8222D0E8);
-REX_EXTERN(sub_8222AB88);
-REX_EXTERN(__imp__sub_8226AAB8);
-REX_EXTERN(__imp__sub_8220E2B0);
-REX_EXTERN(__imp__sub_826567C8);
-REX_EXTERN(__imp__sub_8222C7A0);
+REX_EXTERN(sub_821FAF10);
+REX_EXTERN(sub_821FBC70);
+REX_EXTERN(sub_821FC1C8);
+REX_EXTERN(sub_821F9BB8);
+REX_EXTERN(__imp__sub_82239418);
+REX_EXTERN(__imp__sub_821DD898);
+REX_EXTERN(__imp__sub_8263F358);
+REX_EXTERN(__imp__sub_821FB880);
 
 namespace banjo::d3d {
 namespace native {
@@ -285,7 +285,7 @@ inline uint8_t Init(uint32_t which) {
          PhysOff(w) == PhysOff(limit + 95u) && (limit + 96u <= d || w >= d + dev::kSize);
 }
 
-// sub_8222D0E8 (r3 = device, r4 = dirty bits with bit 63 first, r5 = first register, r6 = shadow): one type-0 packet
+// sub_821FC1C8 (r3 = device, r4 = dirty bits with bit 63 first, r5 = first register, r6 = shadow): one type-0 packet
 // per run of set bits, 16 registers (four vectors, 64 bytes) a bit, padded in front with type-2 packets so that the
 // vectors land 16-aligned. Returns the new write pointer (the last word written). The caller has checked that every
 // run passes the original's own test (w + 4 * (16 * blocks + 3) < limit): w + 80 * bits + 12 < limit.
@@ -322,7 +322,7 @@ inline uint8_t Init(uint32_t which) {
   return w;
 }
 
-// sub_8222CB90 (same arguments): one type-0 packet per run of set bits, one register a bit. The caller has checked
+// sub_821FBC70 (same arguments): one type-0 packet per run of set bits, one register a bit. The caller has checked
 // that every run passes the original's test (w + 4 * length < limit): w + 8 * bits < limit.
 [[gnu::always_inline]] inline uint32_t RegisterRuns(uint8_t* base, uint32_t w, uint64_t m, uint32_t reg0,
                                                     const uint8_t* shadow) {
@@ -348,7 +348,7 @@ inline uint8_t Init(uint32_t which) {
   return w;
 }
 
-// sub_8222AB88 (r3 = device, r4 = dirty bits): the fetch constants, six registers (24 bytes) a bit from register
+// sub_821F9BB8 (r3 = device, r4 = dirty bits): the fetch constants, six registers (24 bytes) a bit from register
 // 0x4800, the values 8-aligned (a type-2 packet is stored after the write pointer and kept when the pointer is 4 mod
 // 8), then the end packet its fast path writes: register 0x5000 x 3 = (0, 0x00025000, 0). The caller has checked that
 // every run passes the original's test ((6 * length + 5) * 4 + w < limit): w + 32 * bits + 20 < limit.
@@ -540,7 +540,7 @@ template <bool indexed>
     valid = WindowOk(d, w, limit, L32(dp + dev::kSoftLimit));
     ok = valid && !force_helpers;
   };
-  // A block of register words: sub_8222CB90(device, mask, first register, shadow), at most `max_bits` bits.
+  // A block of register words: sub_821FBC70(device, mask, first register, shadow), at most `max_bits` bits.
   const auto registers = [&](uint64_t mask, uint32_t reg, uint32_t shadow, uint32_t max_bits) __attribute__((always_inline)) {
     if (ok && uint64_t(w) + 8u * max_bits < limit) [[likely]] {
       w = RegisterRuns(base, w, mask, reg, dp + shadow);
@@ -553,7 +553,7 @@ template <bool indexed>
       ctx.r5.s64 = int64_t(reg);
       ctx.r4.u64 = mask;
       ctx.r3.u64 = d64;
-      sub_8222CB90(ctx, base);
+      sub_821FBC70(ctx, base);
       reload();
       helper_ops(from);
     }
@@ -570,7 +570,7 @@ template <bool indexed>
       ctx.r5.s64 = int64_t(reg);
       ctx.r4.u64 = mask;
       ctx.r3.u64 = d64;
-      sub_8222D0E8(ctx, base);
+      sub_821FC1C8(ctx, base);
       reload();
       helper_ops(from);
     }
@@ -588,7 +588,7 @@ template <bool indexed>
       const uint32_t from = w;
       ctx.r4.u64 = groups;
       ctx.r3.u64 = d64;
-      sub_8222BF10(ctx, base);
+      sub_821FAF10(ctx, base);
       groups = ctx.r3.u64;
       reload();
       helper_ops(from);
@@ -598,7 +598,7 @@ template <bool indexed>
       ctx.r4.u64 = groups;
       ctx.r5.u64 = L32(dp + dev::kReg2203);
       ctx.r3.u64 = d64;
-      __imp__sub_8226AAB8(ctx, base);
+      __imp__sub_82239418(ctx, base);
       groups = ctx.r3.u64;
       reload();
       helper_ops(from);
@@ -621,7 +621,7 @@ template <bool indexed>
         const uint32_t from = w;
         ctx.r4.u64 = mask;
         ctx.r3.u64 = d64;
-        sub_8222AB88(ctx, base);
+        sub_821F9BB8(ctx, base);
         reload();
         helper_ops(from);
       }
@@ -636,7 +636,7 @@ template <bool indexed>
       const uint32_t from = w;
       ctx.r4.u64 = Rldicr(misc, 9, 5);
       ctx.r3.u64 = d64;
-      __imp__sub_8220E2B0(ctx, base);
+      __imp__sub_821DD898(ctx, base);
       reload();
       helper_ops(from);
     }
@@ -830,7 +830,7 @@ template <bool indexed>
     counter = (phase << kCountdownBits) | (e.period - 1);
     e.uses.fetch_add(e.period, std::memory_order_relaxed);
   }
-  PPCFunc* const original = indexed ? &__imp__sub_826567C8 : &__imp__sub_8222C7A0;
+  PPCFunc* const original = indexed ? &__imp__sub_8263F358 : &__imp__sub_821FB880;
   const uint32_t d = ctx.r3.u32;
   if (ctx.r3.u64 < kDeviceLow || ctx.r3.u64 >= kDeviceHigh) {
     original(ctx, base);
@@ -984,7 +984,7 @@ template <bool indexed>
 // (a per-thread tick in the context's slot 62), so one run gives both costs per call under the same load.
 template <bool indexed>
 [[gnu::noinline]] inline bool OriginalTimed(PPCContext& ctx, uint8_t* base, Entry& e) {
-  PPCFunc* const original = indexed ? &__imp__sub_826567C8 : &__imp__sub_8222C7A0;
+  PPCFunc* const original = indexed ? &__imp__sub_8263F358 : &__imp__sub_821FB880;
   if ((++ctx.host_counters[62] & 15u) != 0) {
     original(ctx, base);
     return true;

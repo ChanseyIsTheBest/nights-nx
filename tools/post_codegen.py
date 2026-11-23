@@ -49,6 +49,17 @@ import re
 import subprocess
 import sys
 
+
+def gen_file(gen, suffix):
+    """renut-ultimate (2026-11-19, port 186; found by sasrt-nx's sync): the generator names its files after the project
+    (<project>_pch.h, <project>_init.cpp, <project>_recomp.N.cpp): renut_ in the base, a port's own name otherwise."""
+    for name in sorted(os.listdir(gen)):
+        m = re.fullmatch(r'(\w+)_recomp\.\d+\.cpp', name)
+        if m:
+            return os.path.join(gen, m.group(1) + '_' + suffix)
+    return os.path.join(gen, 'renut_' + suffix)
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, 'app')
 GEN = os.path.join(APP, 'generated')
@@ -74,18 +85,32 @@ def tool(name):
 def main():
     gen = sys.argv[sys.argv.index('--gen') + 1] if '--gen' in sys.argv else GEN
     scratch = os.path.abspath(gen) != os.path.abspath(GEN)  # a copy for measurements: no flavour file
-    pch = os.path.join(gen, 'renut_pch.h')
+    pch = gen_file(gen, 'pch.h')
     if not os.path.isfile(IMAGE):
         sys.exit('post_codegen: out/renut_image.bin is missing (the image dump of the code generator): run the PC '
                  'build through tools\\pc_env.bat, which sets REXGLUE_DUMP_IMAGE, or set it for one codegen run')
     xex = os.path.join(APP, 'assets', 'default.xex')
+    # banjo-nx (2026-10-29): and the title update's patch next to it (the image is the patched one).
+    xexp = xex + 'p'
+    if os.path.isfile(xexp) and os.path.getmtime(xexp) > os.path.getmtime(IMAGE):
+        sys.exit('post_codegen: out/renut_image.bin is older than app/assets/default.xexp: run the code generator with '
+                 'REXGLUE_DUMP_IMAGE set (tools\\pc_env.bat does) so it writes the dump of the patched image again')
     if os.path.isfile(xex) and os.path.getmtime(xex) > os.path.getmtime(IMAGE):
         sys.exit('post_codegen: out/renut_image.bin is older than app/assets/default.xex: run the code generator with '
                  'REXGLUE_DUMP_IMAGE set (tools\\pc_env.bat does) so it writes the dump again')
     os.environ.setdefault('REXSDK_DIR', os.path.join(ROOT, 'sdk'))
+    # nights-nx (2026-11-22, docs/nights-near-exact.md; banjo-nx-ult's form): two of the base's near-exact switches,
+    # cleared on NiGHTS by their PC verify (verify_ne, 300 s of the census route: REX_R1_CHECK 223 million calls, the
+    # guard 69.6 million compares, 0 differences), on by default here so that the build's own codegen step gives the
+    # same tree. =0 in the environment: the exact forms.
+    os.environ.setdefault('BLUR_NX_R1_ASSUME', '1')
+    os.environ.setdefault('BLUR_LOCALIZE_ABI_TRUST', '1')
     # cpu_aggressive (2026-10-16): the late rewrites below change statements the analyses parse (r1l for ctx.r1,
     # REX_LR_WRITE_SAME, computed gotos, hoisted checks): on a tree that was processed before they are taken back out
     # first, so every analysis sees the text it was written for. On a fresh codegen these find nothing.
+    # blur-nx (2026-11-11, CPU batch 1): the DC ZVA pairs come out before the cards (store_cards.py finds a dcbz by its
+    # memset, and tools/localize_native.py knows the memset's store, not REX_DCBZ128).
+    run(tool('vec_dcbz_zva.py'), '--gen', gen, '--restore')
     # banjo-nx (2026-10-19): the store cards were the last step: out first.
     run(tool('store_cards.py'), '--gen', gen, '--restore')
     run(tool('switch_goto.py'), '--gen', gen, '--restore')
@@ -97,6 +122,11 @@ def main():
     run(tool('inline_leaves.py'), '--gen', gen, '--restore')
     run(tool('vsel_neon.py'), '--gen', gen, '--restore')
     run(tool('hot_layout.py'), '--gen', gen, '--restore')
+    # sasrt-nx (2026-11-12, its idea 2; port 121): the forwarded stack-slot vector loads out too (put back below).
+    run(tool('stack_forward.py'), '--gen', gen, '--restore')
+    # renut-ultimate (2026-11-16, port 144): the negated fused multiply-adds' macro out too (single_floats.py and
+    # fma_single.py read the forms it wraps; put back below).
+    run(tool('fnm_sign.py'), '--gen', gen, '--restore')
     run(tool('pch_no_volatile.py'), pch)
     run(tool('indirect_calls.py'), '--gen', gen, '--promote', PROMOTIONS)
     # REQUIRED with pch_no_volatile.py: without barriers GCC turns guest polling loops into infinite loops.
@@ -106,6 +136,9 @@ def main():
     # again. --redo writes only the files that change, so the build does not recompile the others.
     run(tool('direct_calls.py'), '--redo', '--gen', gen)
     run(tool('guest_cas.py'), '--gen', gen)
+    # blur-nx (2026-11-16, the 15 ms batch, #164 / #165): sync, lwsync and eieio with the PowerPC's orderings (lwsync
+    # `dmb ishld` + `dmb ishst`, eieio `dmb ishst` on AArch64; g_rex_guest_fence_full puts the full fence back).
+    run(tool('guest_fences.py'), '--gen', gen)
     run(tool('flush_mode_flow.py'), '--redo', '--gen', gen, '--image', IMAGE, '--tomls', *HOOK_TOMLS)
     run(tool('vec_byteswap.py'), '--gen', gen)
     run(tool('pch_neon_shuffles.py'), pch)
@@ -126,6 +159,17 @@ def main():
     run(tool('single_floats.py'), '--gen', gen)
     run(tool('inline_memcalls.py'), '--gen', gen)
     run(tool('vec_unaligned_stores.py'), '--gen', gen)
+    # blur-nx (2026-11-11): stvewx / stvehx lanes read from the register, not stored to the stack and loaded back (the
+    # A57 cannot forward the wider store; sdk/include/rex/ppc/vec_lane.h, checked on the device by the forms
+    # self-check). Before the localized copies, so they take the same form.
+    run(tool('vec_lane_index.py'), '--gen', gen)
+    # blur-nx (2026-11-11, CPU batch 1; the user: "do all the exact ones", "optimise the hell out of CPU ... in large
+    # batches"): docs/vector-store-ideas.md VS-27, VS-08, VS-25 and docs/vector-ideas-2.md VX-20, VX-21, each exact and
+    # checked by the app's forms self-check on the device. Before the localized copies, so they take the same forms.
+    run(tool('vec_cvt_fixed.py'), '--gen', gen)      # vcfsx / vcfux with a scale: one SCVTF / UCVTF #n
+    run(tool('vec_prefetch_line.py'), '--gen', gen)  # a guest dcbt prefetches the whole 128-byte line
+    run(tool('vec_lvlx_splat.py'), '--gen', gen)     # lvlx + vspltw 0: one 4-byte load (where the lvlx is dead after)
+    run(tool('vec_shift_whole.py'), '--gen', gen)    # vsrw / vsraw as one vector shift; vslw without the dead clamp
     # banjo-nx (2026-10-16, CPU codegen agent): the read-only constants ro_constants.py could not see because a label
     # stood between the base register's constant and the load (loop heads): followed over the control-flow graph.
     run(tool('ro_constants_cfg.py'), '--gen', gen, '--image', IMAGE, *(['--xex', xex] if os.path.isfile(xex) else []))
@@ -144,7 +188,42 @@ def main():
     # cpu_aggressive A: a loop header's flush-mode check in front of the loop (178 loops; the copies below get it too).
     # Switch back: BANJO_GEN_FLUSH_HOIST=OFF (REX_FLUSH_HOIST_OFF: the original check in the loop again).
     run(tool('flush_hoist.py'), '--gen', gen)
+    # sasrt-nx (2026-11-11, port 73; its machine-copy idea 43 B3): vupkd3d128 type 0 as one NEON table lookup (before
+    # the copies, so they get it too; REX_VUPKD3D_LANES: the four lane lines).
+    run(tool('vupkd3d_neon.py'), '--gen', gen)
+    # sasrt-nx (2026-11-11, port 72; its machine-copy idea 43 F1-F4): vrsqrtefp, vrefp, vlogefp, vmaddfp and vnmsubfp as
+    # macros (their default is the expression the generator writes; CMake SASRT_VMX_FAST_ESTIMATES / SASRT_VMX_FUSED_MADD,
+    # ON, give the faster AArch64 forms). Before the copies, so they get the macros too.
+    run(tool('vmx_float_macros.py'), '--gen', gen)
+    # blur-nx (2026-11-12, the user: "Please do the fmadds change"): fmadds / fmsubs / fnmadds / fnmsubs rounded once in
+    # single precision, as the Xenon does (sdk/include/rex/ppc/fma_single.h; not bit-exact to the double rounding the
+    # generator wrote; CMake BLUR_FMADDS_SINGLE=OFF gives it back). Before the copies, so they take the same form.
+    run(tool('fma_single.py'), '--gen', gen)
+    # renut-ultimate (2026-11-16, port 144; tw2de_nx's fnmadd / fnmsub fix): the negated fused multiply-adds as
+    # REX_FNEG_FUSED(...), the plain negation by default (the same code); CMake TW2DE_FNMADD_SIGN=ON (off by default)
+    # gives the PowerPC's sign of zero and NaN (sdk/include/rex/ppc/fpu_fma.h). After fma_single.py, before the copies.
+    run(tool('fnm_sign.py'), '--gen', gen)
+    # sasrt-nx (2026-11-12, its docs/cpu-moonshots-1112.md idea 2; port 121): a vector load of a stack slot that four
+    # 4-byte stores of the same block just wrote takes the stored values (the stores stay; REX_STACK_FWD4 checks the
+    # address, REX_STACK_FWD_VERIFY compares with the real load in the hooked builds). Before the copies, so they take
+    # the same form. REX_STACK_FWD_OFF (compile time): the original loads.
+    run(tool('stack_forward.py'), '--gen', gen)
+    # blur-nx (2026-11-13, M-23 of docs/cpu-moonshots-50-1113.md): float_loads.py again, now with the any-mode pairs
+    # (CG-13: the helpers are the plain conversions, so their loads and stores go through the vector unit too), and the
+    # plain single loads the steps above made after its first run (single_floats.py turns proven any-mode loads into
+    # plain ones: 10,239 sites were left in the integer form). After ro_constants_cfg.py and dead_ctx_defs.py, before
+    # the copies (so they take the same forms) and store_cards.py (which marks the new stores' cards). renut-ultimate
+    # (2026-11-13): after port 121's stack_forward.py, which then sees the stores as port 121 measured them.
+    run(tool('float_loads.py'), '--gen', gen, '--any-mode', '--doubles')  # #231: lfd too (2026-11-17)
+    # blur-nx (2026-11-13, docs/cpu-near-exact-50-1113.md, the user's choice of near-exact ideas): the forms a near-exact
+    # switch changes as helpers whose default is the generator's expression (#42: vmaxfp / vminfp as rex::ppc::VMaxFp /
+    # VMinFp, sdk/include/rex/ppc/diet_ops.h). Before the copies, so they take the same forms.
+    run(tool('near_exact.py'), '--gen', gen)
     if not scratch:
+        # sasrt-nx (2026-11-12, its calling-convention stages 1-1d; port 121): whole-program liveness with the vector
+        # registers, right before the copies are made from this same text (localize_native.py checks the stamp):
+        # what a real call need not hand over, the vector LiveOut, the scratch vectors dead after an indirect call.
+        run(tool('reg_liveness.py'), '--gen', gen, '--image', IMAGE)
         # The localized native copies (app/generated/hot, from sa2-nx): made from the text as it stands after every
         # step above, so each copy matches the function the build compiles. The list is app/src/cpu/hot/localized.txt;
         # direct_calls.py (above) has already sent the callers of those functions through their hooks.
@@ -152,7 +231,7 @@ def main():
         run(tool('localize_native.py'), '--list', '--bulk')
         # cpu_aggressive B: the XAudio limiter's copy computes log10 only where the dB value is read (the recompiled
         # original stays as it is: the hook's guard compares the two). Switch back: BANJO_HOT_LAZY_LOG10=OFF
-        # (-DBANJO_LAZY_LOG10_ON=0) or the key banjo_cpu_native_sub_82B0D0C0.
+        # (-DBANJO_LAZY_LOG10_ON=0) or the key banjo_cpu_native_sub_82B6A678.
         run(tool('limiter_lazy_log10.py'), '--hot', os.path.join(gen, 'hot'))
     # cpu_aggressive C: the script interpreters' jump-table dispatch threaded into each handler (computed gotos, GCC
     # cross-jumping off for these functions only). Switch back: REX_SWITCH_THREAD_OFF / REX_SWITCH_GOTO_OFF.
@@ -171,7 +250,11 @@ def main():
     # on the whole-program proof that callees return with r1 unchanged. REX_R1_CHECK (PC verify) tests the assumed
     # calls, REX_R1_STRICT reloads after them, REX_R1_LOCAL_OFF is the original code.
     run(tool('r1_preserve.py'), '--gen', gen, '--out', os.path.join(proofs, 'strict'))
-    run(tool('r1_preserve.py'), '--gen', gen, '--out', os.path.join(proofs, 'assumed'), '--indirect-preserve')
+    # blur-nx (2026-11-13, near-exact #9): with BLUR_NX_R1_ASSUME=1 in the environment, the assumed proof also takes a
+    # function as preserving unless its own body fails (r1_preserve.py --near-exact); the strict one stays a proof, so
+    # REX_R1_CHECK (PC) tests every call the assumption covers.
+    run(tool('r1_preserve.py'), '--gen', gen, '--out', os.path.join(proofs, 'assumed'), '--indirect-preserve',
+        *(['--near-exact'] if os.environ.get('BLUR_NX_R1_ASSUME') == '1' else []))
     run(tool('r1_local.py'), '--gen', gen, '--proof-strict', os.path.join(proofs, 'strict', 'r1_preserve.json'),
         '--proof-assumed', os.path.join(proofs, 'assumed', 'r1_preserve.json'),
         '--only-file', os.path.join(APP, 'config', 'r1_local_choice.json'))
@@ -184,6 +267,22 @@ def main():
     # banjo-nx (2026-10-19, CPU proposal 1): the store cards, after everything else (the inline copies included): every
     # store outside the stack marks its page for Renut's cached vertex and index copies (REX_STORE_CARDS_OFF).
     run(tool('store_cards.py'), '--gen', gen)
+    # blur-nx (2026-11-11, CPU batch 2, docs/vector-store-ideas.md VS-14): in the copies, one card check per group of
+    # card stores to the same base in a straight stretch (two at its end: the lowest and highest offset's page).
+    run(tool('card_groups.py'), '--gen', gen)
+    # blur-nx (2026-11-11, CPU batch 2, docs/vector-ideas-2.md VX-15 / VX-14): in the copies' f_ bodies only (the o_
+    # bodies stay the guard's reference), two or four broadcast dot products merged by vmrghw / vmrglw as one
+    # pairwise-add tree (sdk/include/rex/ppc/vec_batch2.h).
+    run(tool('vec_dp_merge.py'), '--gen', gen)
+    # blur-nx (2026-11-11, CPU batch 2, docs/vector-ideas-2.md VX-29 / VX-02): in the copies' f_ bodies, vupkd3d128 of a
+    # zero register as 1.0 and vcuxwfp128 / vcsxwfp128 of a known splat as their constants.
+    run(tool('vec_const_fold.py'), '--gen', gen)
+    # blur-nx (2026-11-11, CPU batch 1, docs/vector-store-ideas.md VS-05): a 128-byte dcbzl as two DC ZVA (no read of
+    # the line it zeroes). After store_cards.py, which finds the dcbz by its memset to put the card in front.
+    run(tool('vec_dcbz_zva.py'), '--gen', gen)
+    # blur-nx (2026-11-16, the 15 ms batch, CG-26): the files that write the guest FPSCR keep -ftrapping-math when the
+    # rest gets -fno-trapping-math (a port's CMake option: Blur's BLUR_NO_TRAPPING_MATH); last, on the final text.
+    run(tool('fp_env_files.py'), '--gen', gen)
     if scratch:
         print(f'post_codegen: optimised codegen steps done on {gen}')
         return

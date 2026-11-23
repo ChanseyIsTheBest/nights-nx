@@ -281,6 +281,10 @@ constexpr u32 kDeviceOffsetStreamStrides = 0x3268;      // SetStreamSource, u8[1
 constexpr u32 kDeviceOffsetTextures = 0x3278;           // SetTexture, [kTextureFetchSlots]
 constexpr u32 kDeviceOffsetPixelShader = 0x330C;        // SetPixelShader
 constexpr u32 kDeviceOffsetVertexShader = 0x3310;       // SetVertexShader
+// renut-ultimate (2026-11-14, port 138; blur-nx's #55): CDevice's viewport floats (x, y, width, height), which D3D
+// clamps a clear to. nights-nx (2026-11-22): +13024, read from NiGHTS's D3DDevice_GetViewport sub_8233D8B0
+// (`lfs f0,13024(r3)` .. 13044; Katamari 0x3160, N&B 0x3170, SA2's 21076 the same +13024).
+constexpr u32 kDeviceOffsetViewport = 0x32E0;
 // In m_TessellatorPacket, which holds registers 0x2280 on: VGT_HOS_CNTL
 // (tessellation mode in bits 0-1: 0 discrete, 1 continuous, 2 adaptive) and
 // the float VGT_HOS_MAX_TESS_LEVEL / VGT_HOS_MIN_TESS_LEVEL.

@@ -7,12 +7,12 @@
 // These hooks provide both, exactly as nfsmw_nativo_ganchos.cpp did for NFSMW, at Banjo's addresses
 // (config/renut_gpu_funcs.toml, confirmed against the recompiled code):
 //
-//   D3DDevice_CreatePixelShader   0x8264E6A8  r3 = container (pFunction) -> r3 = object
-//   D3DDevice_CreateVertexShader  0x8264E8B0  r3 = container (pFunction) -> r3 = object
-//   D3DDevice_DrawVertices        0x8222C7A0  (dev, type, start, count)
-//   D3DDevice_DrawIndexedVertices 0x826567C8  (dev, type, base, start, count)
-//   D3DDevice_DrawVerticesUP      0x8222E520  (dev, type, count, data, stride)
-//   D3DDevice_Swap                0x82287590  game frame counter
+//   D3DDevice_CreatePixelShader   0x826375D8  r3 = container (pFunction) -> r3 = object
+//   D3DDevice_CreateVertexShader  0x826377C0  r3 = container (pFunction) -> r3 = object
+//   D3DDevice_DrawVertices        0x821FB880  (dev, type, start, count)
+//   D3DDevice_DrawIndexedVertices 0x8263F358  (dev, type, base, start, count)
+//   D3DDevice_DrawVerticesUP      0x821FD698  (dev, type, count, data, stride)
+//   D3DDevice_Swap                0x822554F8  game frame counter
 //
 // reNut's midasm hooks on the two constructors (shader_dump.cpp) live inside the __imp__ bodies and keep
 // working: these hooks wrap the whole function.
@@ -162,54 +162,54 @@ void ComprobarDispositivo(const uint8_t* base, uint32_t dispositivo) {
 
 // ---- Shader constructors ------------------------------------------------------------------------------
 
-REX_EXTERN(__imp__sub_8264E6A8);
-REX_HOOK_RAW(sub_8264E6A8) {  // D3DDevice_CreatePixelShader
+REX_EXTERN(__imp__sub_826375D8);
+REX_HOOK_RAW(sub_826375D8) {  // D3DDevice_CreatePixelShader
   const auto* entrada = nativo::ganchos_detalle::IdentificarCreacion(base, ctx.r3.u32, false);
-  __imp__sub_8264E6A8(ctx, base);
+  __imp__sub_826375D8(ctx, base);
   nativo::ganchos_detalle::RecordarCreacion(ctx.r3.u32, entrada, false);
   RecordarObjeto(ctx.r3.u32, false);
 }
 
-REX_EXTERN(__imp__sub_8264E8B0);
-REX_HOOK_RAW(sub_8264E8B0) {  // D3DDevice_CreateVertexShader
+REX_EXTERN(__imp__sub_826377C0);
+REX_HOOK_RAW(sub_826377C0) {  // D3DDevice_CreateVertexShader
   const auto* entrada = nativo::ganchos_detalle::IdentificarCreacion(base, ctx.r3.u32, true);
-  __imp__sub_8264E8B0(ctx, base);
+  __imp__sub_826377C0(ctx, base);
   nativo::ganchos_detalle::RecordarCreacion(ctx.r3.u32, entrada, true);
   RecordarObjeto(ctx.r3.u32, true);
 }
 
 // ---- Draws: one record each, before the original, as NFSMW's d3d_trace hooks did ---------------------
 
-REX_EXTERN(__imp__sub_8222C7A0);
-REX_HOOK_RAW(sub_8222C7A0) {  // D3DDevice_DrawVertices(dev, type, start, count)
+REX_EXTERN(__imp__sub_821FB880);
+REX_HOOK_RAW(sub_821FB880) {  // D3DDevice_DrawVertices(dev, type, start, count)
   ComprobarDispositivo(base, ctx.r3.u32);
   nativo::AnotarDibujo(nativo::FuncionDibujo::kVertices, base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
                        ctx.r6.u32, ctx.r7.u32);
-  __imp__sub_8222C7A0(ctx, base);
+  __imp__sub_821FB880(ctx, base);
   nativo::TerminarDibujo();
 }
 
-REX_EXTERN(__imp__sub_826567C8);
-REX_HOOK_RAW(sub_826567C8) {  // D3DDevice_DrawIndexedVertices(dev, type, base, start, count)
+REX_EXTERN(__imp__sub_8263F358);
+REX_HOOK_RAW(sub_8263F358) {  // D3DDevice_DrawIndexedVertices(dev, type, base, start, count)
   ComprobarDispositivo(base, ctx.r3.u32);
   nativo::AnotarDibujo(nativo::FuncionDibujo::kIndexados, base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
                        ctx.r6.u32, ctx.r7.u32);
-  __imp__sub_826567C8(ctx, base);
+  __imp__sub_8263F358(ctx, base);
   nativo::TerminarDibujo();
 }
 
-REX_EXTERN(__imp__sub_8222E520);
-REX_HOOK_RAW(sub_8222E520) {  // D3DDevice_DrawVerticesUP(dev, type, count, data, stride)
+REX_EXTERN(__imp__sub_821FD698);
+REX_HOOK_RAW(sub_821FD698) {  // D3DDevice_DrawVerticesUP(dev, type, count, data, stride)
   nativo::AnotarDibujo(nativo::FuncionDibujo::kVerticesUP, base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
                        ctx.r6.u32, ctx.r7.u32);
-  __imp__sub_8222E520(ctx, base);
+  __imp__sub_821FD698(ctx, base);
   nativo::TerminarDibujo();
 }
 
 // ---- Swap: the game's frame counter ------------------------------------------------------------------
 
-REX_EXTERN(__imp__sub_82287590);
-REX_HOOK_RAW(sub_82287590) {  // D3DDevice_Swap
-  __imp__sub_82287590(ctx, base);
+REX_EXTERN(__imp__sub_822554F8);
+REX_HOOK_RAW(sub_822554F8) {  // D3DDevice_Swap
+  __imp__sub_822554F8(ctx, base);
   g_nfsmw_fotogramas_juego.fetch_add(1, std::memory_order_relaxed);
 }

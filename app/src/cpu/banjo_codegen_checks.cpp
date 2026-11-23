@@ -55,16 +55,85 @@ extern "C" {
 volatile unsigned long long g_rex_ro_checked = 0;      // plain lossy counts: "at least this many"
 volatile unsigned long long g_rex_promoted_calls = 0;
 unsigned char g_rex_indirect_census = 0;
+// renut-ultimate (2026-11-14, port 140): RexNxCasCensus (below) only while banjo_diag_runtime_census is on. Unguarded,
+// every guest compare-and-swap of a PC build took one global mutex: Katamari's start-up spin locks crawled for ~33 s
+// (the main thread caught in RexNxCasCensus; 2026-11-14 runs p138_*).
+unsigned char g_rex_cas_census = 0;
 volatile unsigned long long g_rex_flush_flow_checked = 0;
 // 2026-10-16 (the CPU codegen agent's aggressive round): tools/r1_local.py (the r1 mirror after kept or assumed calls,
 // REX_R1_CHECK) and tools/lr_preserve.py --rewrite (link-register write-backs proven redundant,
 // REX_LR_WRITE_SAME_CHECK).
 volatile unsigned long long g_rex_r1_checked = 0;
 volatile unsigned long long g_rex_lr_write_checked = 0;
+// sasrt-nx (2026-11-12, its idea 2; port 121): tools/stack_forward.py's REX_STACK_FWD_VERIFY (the hooked builds).
+volatile unsigned long long g_rex_stack_fwd_checked = 0;
 // rex/ppc/diet_ops.h, REX_DIET_CENSUS_ON: executions of the any-mode float helpers in the game code (conversions,
 // compares, arithmetic, cold paths, float copy loads and stores).
 volatile unsigned long long g_rex_diet_census[6] = {};
+// blur-nx (2026-11-13, docs/cpu-near-exact-50-1113.md): the near-exact ideas' census (rex/ppc/diet_ops.h REX_NX_CENSUS).
+volatile unsigned long long g_rex_nx_census[48] = {};
 }
+
+#if !defined(__SWITCH__)
+// blur-nx (2026-11-13, #32 of docs/cpu-near-exact-50-1113.md): the words the guest's compare-and-swaps write, and
+// whether more than one thread ever does (a word only one thread uses could take plain operations). An open-addressing
+// table of 65,536 words under a lock (the PC census only: tools/guest_cas.py's RexGuestCas calls it).
+namespace {
+struct CasWord {
+  uintptr_t word = 0;
+  uint32_t thread = 0;
+  bool shared = false;
+  uint64_t count = 0;
+};
+std::mutex g_cas_mutex;
+CasWord g_cas_words[65536];
+uint64_t g_cas_full = 0;
+uint32_t CasThreadId() {
+  static std::atomic<uint32_t> next{1};
+  thread_local uint32_t id = next.fetch_add(1, std::memory_order_relaxed);
+  return id;
+}
+}  // namespace
+extern "C" void RexNxCasCensus(const void* word) {
+  if (!g_rex_cas_census) [[likely]] return;  // renut-ultimate (2026-11-14): the census runs only
+  const uintptr_t w = reinterpret_cast<uintptr_t>(word);
+  const uint32_t thread = CasThreadId();
+  std::lock_guard<std::mutex> lock(g_cas_mutex);
+  size_t i = size_t((w >> 2) * 0x9E3779B97F4A7C15ull >> 48);
+  for (size_t probes = 0; probes < 65536; ++probes, i = (i + 1) & 65535) {
+    CasWord& c = g_cas_words[i];
+    if (c.word == w) {
+      if (c.thread != thread) c.shared = true;
+      ++c.count;
+      return;
+    }
+    if (c.word == 0) {
+      c.word = w;
+      c.thread = thread;
+      c.count = 1;
+      return;
+    }
+  }
+  ++g_cas_full;
+}
+static void CasCensusReport() {
+  std::lock_guard<std::mutex> lock(g_cas_mutex);
+  uint64_t words = 0, single = 0, single_count = 0, shared_count = 0;
+  for (const CasWord& c : g_cas_words) {
+    if (!c.word) continue;
+    ++words;
+    if (c.shared) {
+      shared_count += c.count;
+    } else {
+      ++single;
+      single_count += c.count;
+    }
+  }
+  REXLOG_INFO("[census] near-exact #32 (cumulative): {} words written by guest compare-and-swaps, {} of them by one "
+              "thread only ({} of {} compare-and-swaps; {} not tabled: the table full)",
+              words, single, single_count, single_count + shared_count, g_cas_full);
+}
+#endif
 
 #if defined(_WIN32)
 extern "C" __declspec(dllimport) void* __stdcall GetModuleHandleW(const wchar_t* name);
@@ -80,6 +149,7 @@ std::atomic<uint64_t> g_promoted_mismatches{0};
 std::atomic<uint64_t> g_flush_flow_mismatches{0};
 std::atomic<uint64_t> g_r1_mismatches{0};
 std::atomic<uint64_t> g_lr_write_mismatches{0};
+std::atomic<uint64_t> g_stack_fwd_mismatches{0};  // port 121
 
 // One call site: (function address << 32) | ordinal. Up to four targets are told apart; the rest is "other".
 struct Site {
@@ -127,6 +197,17 @@ extern "C" void RexLrWriteMismatch(unsigned long long held, unsigned long long w
   }
 }
 
+// sasrt-nx (2026-11-12, its idea 2; port 121): a vector load tools/stack_forward.py forwards from four stores read
+// something else for real (REX_STACK_FWD_VERIFY: the hooked builds compare each forward with the real load).
+extern "C" void RexStackFwdMismatch(unsigned address) noexcept {
+  ::me::native::VerifyDifference();
+  if (g_stack_fwd_mismatches.fetch_add(1, std::memory_order_relaxed) < 16) {
+    REXLOG_ERROR("[enhancements] DIFFERENCE: stack forwarding: the vector load of the stack slot at {:08X} does not read "
+                 "the four words its stores wrote (tools/stack_forward.py)",
+                 address);
+  }
+}
+
 extern "C" void RexRoMismatch(unsigned address) noexcept {
   ::me::native::VerifyDifference();
   if (g_ro_mismatches.fetch_add(1, std::memory_order_relaxed) < 16) {
@@ -138,7 +219,20 @@ extern "C" void RexRoMismatch(unsigned address) noexcept {
 
 extern "C" void RexPromotedMismatch(unsigned target) noexcept {
   ::me::native::VerifyDifference();
-  if (g_promoted_mismatches.fetch_add(1, std::memory_order_relaxed) < 16) {
+  g_promoted_mismatches.fetch_add(1, std::memory_order_relaxed);
+  // banjo-nx (2026-10-29): each target once (it was the first 16 calls, which named the same few targets, so a list
+  // made from them left the rest in), up to 1024 targets.
+  static std::mutex mutex;
+  static std::vector<unsigned> seen;
+  bool first = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (seen.size() < 1024 && std::find(seen.begin(), seen.end(), target) == seen.end()) {
+      seen.push_back(target);
+      first = true;
+    }
+  }
+  if (first) {
     REXLOG_ERROR("[enhancements] DIFFERENCE: promoted indirect call: the dispatch table's entry for {:08X} is not the "
                  "function the generated code calls",
                  target);
@@ -146,6 +240,10 @@ extern "C" void RexPromotedMismatch(unsigned target) noexcept {
 }
 
 extern "C" void RexIndirectCensus(unsigned function, unsigned site, unsigned target) noexcept {
+  // culdcept-nx (2026-11-19): a call through a pointer outside the image (a null vtable entry, a callback never set)
+  // names its guest function and site before the dispatcher's "unregistered function" stop, which names only the target.
+  if (target < 0x82000000u || target >= 0x84000000u) [[unlikely]]
+    REXLOG_ERROR("[census] indirect call to {:08X} from sub_{:08X} (site {:08X})", target, function, site);
   const uint64_t key = (uint64_t(function) << 32) | site;
   Stripe& stripe = g_stripes[(key * 0x9E3779B97F4A7C15ull) >> 58];
   std::lock_guard<std::mutex> lock(stripe.mutex);
@@ -207,6 +305,57 @@ void RuntimeCensusReport(int seconds) {
                 "cold paths {:.0f}; proven flush checks executed {:.0f}",
                 diet[0], diet[1], diet[2], diet[3], proven_s);
     REXLOG_INFO("[census] float copy forms per second (fp_copy_pairs): loads {:.0f}, stores {:.0f}", diet[4], diet[5]);
+    // blur-nx (2026-11-13, docs/cpu-near-exact-50-1113.md): each rare case a near-exact switch would change, cumulative
+    // (rex/ppc/diet_ops.h REX_NX_CENSUS: the numbers there are the doc's idea numbers).
+    {
+      unsigned long long nx[48];
+      for (int i = 0; i < 48; ++i) nx[i] = g_rex_nx_census[i];
+      REXLOG_INFO("[census] near-exact (cumulative): #1 signalling NaNs at float copy stores {} | #2 NaNs into "
+                  "float-to-integer conversions {} | #17 signed divisions by zero {}, INT_MIN / -1 {}, unsigned "
+                  "divisions by zero {} | #41 float compares with a NaN {} | #42 vector max/min with a differing lane "
+                  "{} of {} | #3 FPSCR writes {}, changing the mode {}, to a mode other than nearest {} | #4 FPSCR "
+                  "reads {} | #5 integer compares copying XER[SO] = 1 {}",
+                  nx[0], nx[1], nx[2], nx[3], nx[4], nx[5], nx[6], nx[13], nx[7], nx[8], nx[9], nx[10], nx[11]);
+      REXLOG_INFO("[census] near-exact audio (cumulative; Blur's node loop, tools/blur_mix_nx.py): gains unity {}, "
+                  "zero {}, other constant {} (within 1e-7 of 1: {}, within 1e-5: {}; under 2^-16: {}) | ramps {} "
+                  "(under 1e-6: {}, under 2^-16: {}; both ends under 2^-16: {})",
+                  nx[18], nx[22], nx[16], nx[17], nx[23], nx[21], nx[19], nx[20], nx[24], nx[30]);
+      REXLOG_INFO("[census] near-exact #38 (cumulative): card marks of the generated tree {}, the copies' run marks {} "
+                  "(#66: with a run pending; {} of them on a page Renut reads, {} writing the card)",
+                  nx[25], nx[26], nx[33], nx[34]);
+      REXLOG_INFO("[census] near-exact #49 (cumulative): resampling blocks {}, of them 256 samples at a ratio other "
+                  "than 1 (the copy would newly take them) {}",
+                  nx[27], nx[28]);
+      REXLOG_INFO("[census] near-exact #43 (cumulative): exp memo hits {}, misses {} (cpu_nx_exp_memo)", nx[31], nx[32]);
+#if !defined(__SWITCH__)
+      CasCensusReport();  // blur-nx (2026-11-13, #32)
+      REXLOG_INFO("[census] near-exact #57 / #34 (cumulative): single-object waits that succeeded {}, polls (a zero "
+                  "timeout) {}, of them timed out (then a yield) {}",
+                  CensusRead(rex::syscount::kCensusWaitSignalled), CensusRead(rex::syscount::kCensusWaitPoll),
+                  CensusRead(rex::syscount::kCensusWaitPollTimeout));
+#endif
+    }
+    // blur-nx (2026-11-12, codegen-ideas-3 CG-13's census): what one flush mode for all code would change. The
+    // any-mode cold paths above are scalar results in VMX code that met a denormal; the FPU-mode regions are the plain
+    // scalar code between switches, and a region with a denormal operand or an underflow (x86 flags, a lower bound)
+    // holds at least one result that would change.
+    const double regions = per_s(kCensusFpuRegions), denormal = per_s(kCensusFpuDenormal);
+    REXLOG_INFO("[census] CG-13 (one flush mode): per second {:.0f} any-mode cold paths and {:.0f} of {:.0f} FPU-mode "
+                "regions with a denormal operand or an underflow: scalar results the one-mode build would change",
+                diet[3], denormal, regions);
+  }
+  {
+    // CG-13's census: where those happen (cumulative, image offset:count; tools/census_sites.py --denormal).
+    static int denormal_reports = 0;
+    if ((++denormal_reports % 3) == 0) {
+      // banjo-nx (2026-11-19, a handoff): 256 sites, not 48. The forms self-check's own sites took about 20 of the 48,
+      // so a rarer site (a physics function a few hundred times a run) could be missing from the list.
+      static uint64_t addresses[256], counts[256];
+      const size_t n = CensusDenormalSites(addresses, counts, 256);
+      std::string list;
+      for (size_t i = 0; i < n; ++i) list += fmt::format(" +{:X}:{}", addresses[i] - CensusImageBase(), counts[i]);
+      if (n) REXLOG_INFO("[census] denormal sites (CG-13, cumulative, image offset:count):{}", list);
+    }
   }
   // Where the mode is switched: the most counted code addresses so far, as offsets into the executable
   // (tools/census_sites.py turns them into functions and generated source lines).
@@ -260,6 +409,7 @@ void RuntimeCensusReport(int seconds) {
 namespace banjo {
 
 void CodegenChecksInit() {
+  g_rex_cas_census = REXCVAR_GET(banjo_diag_runtime_census) ? 1 : 0;  // renut-ultimate (2026-11-14, port 140)
   g_rex_indirect_census = REXCVAR_GET(banjo_diag_indirect_census).empty() ? 0 : 1;
   if (g_rex_indirect_census) {
     REXLOG_INFO("[census] indirect calls: every tagged call site reports its target; the table goes to {} with each "
@@ -311,6 +461,15 @@ void CodegenChecksReport(int seconds) {
       REXLOG_INFO("[verify] r1 mirror checked after {} calls, {} link-register write-backs proven redundant checked; "
                   "0 differences", r1, lr);
     }
+  }
+  if (const uint64_t fwd = g_rex_stack_fwd_checked) {  // sasrt-nx (2026-11-12, its idea 2; port 121)
+    const uint64_t wrong = g_stack_fwd_mismatches.load(std::memory_order_relaxed);
+    if (wrong)
+      REXLOG_ERROR("[enhancements] DIFFERENCE: generated-code self-checks (cumulative): stack forwards {} of {} wrong",
+                   wrong, fwd);
+    else
+      REXLOG_INFO("[verify] stack forwards (tools/stack_forward.py) checked against the real load: {}; 0 differences",
+                  fwd);
   }
   if (!g_rex_indirect_census) return;
   // The census: the whole table, most called sites first.
@@ -367,11 +526,38 @@ void CodegenChecksReport(int seconds) {
 
 }  // namespace banjo
 
-#else  // the Switch build: nothing to check, nothing to count
+#else  // the Switch build: only the hooked (guard) build's stack-forward self-check (REX_STACK_FWD_VERIFY)
+
+// sasrt-nx (2026-11-12, its idea 2; port 121): defined in the hooked builds only (app/CMakeLists.txt); the in-place
+// console builds never reference these.
+extern "C" {
+volatile unsigned long long g_rex_stack_fwd_checked = 0;
+}
+
+namespace {
+std::atomic<uint64_t> g_stack_fwd_mismatches{0};
+}
+
+extern "C" void RexStackFwdMismatch(unsigned address) noexcept {
+  if (g_stack_fwd_mismatches.fetch_add(1, std::memory_order_relaxed) < 16) {
+    REXLOG_ERROR("[enhancements] DIFFERENCE: stack forwarding: the vector load of the stack slot at {:08X} does not read "
+                 "the four words its stores wrote (tools/stack_forward.py)",
+                 address);
+  }
+}
 
 namespace banjo {
 void CodegenChecksInit() {}
-void CodegenChecksReport(int) {}
+void CodegenChecksReport(int) {
+  const uint64_t fwd = g_rex_stack_fwd_checked;
+  if (!fwd) return;
+  const uint64_t wrong = g_stack_fwd_mismatches.load(std::memory_order_relaxed);
+  if (wrong)
+    REXLOG_ERROR("[enhancements] DIFFERENCE: generated-code self-checks (cumulative): stack forwards {} of {} wrong", wrong,
+                 fwd);
+  else
+    REXLOG_INFO("[verify] stack forwards (tools/stack_forward.py) checked against the real load: {}; 0 differences", fwd);
+}
 }  // namespace banjo
 
 #endif

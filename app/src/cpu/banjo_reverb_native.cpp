@@ -1,7 +1,7 @@
-// banjo-nx - native XAudio reverb: princeton_digital::stereo_room_t<float>::process (0x826683D0).
+// banjo-nx - native XAudio reverb: princeton_digital::stereo_room_t<float>::process (0x826508C0).
 //
 // THE GAME
-//   XAUDIO::CReverbEffect::Process -> XAUDIO::CStereoRoomFloat::Process (0x82667948) ->
+//   XAUDIO::CReverbEffect::Process -> XAUDIO::CStereoRoomFloat::Process (0x8264FE40) ->
 //   stereo_room_t<float>::process(r3 = room, r4 = &{in L, in R}, r5 = &{6 channel outputs}, r6 = 256).
 //   One call renders one 256-sample frame; the recompiled version costs about a quarter of a core on
 //   the Switch (every float is a ctx register round trip, every access a volatile byte-swapped load).
@@ -37,7 +37,7 @@
 //     - The output mix's vmaddfp follows the build's contraction (MixFuses).
 //   NaN-ness is reproduced, NaN payloads and signs are not (they depend on each compiler's operand
 //   order, and the generated code quiets signalling NaNs on every lfs/stfs). Real audio has no NaNs.
-//   The caller (0x82667948) reads no volatile register after the call, so none is set; nonvolatile
+//   The caller (0x8264FE40) reads no volatile register after the call, so none is set; nonvolatile
 //   registers are untouched (the original restores them). The one write above the frame, the spill
 //   of r3 to the caller's home slot (stw r30,17988(r1) = caller sp + 20), is reproduced.
 //
@@ -55,6 +55,7 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+#include <rex/ppc/fma_single.h>  // port 96
 
 #include "cpu/banjo_enhancements.h"
 #include "me/me_verify.h"
@@ -73,7 +74,7 @@
 #endif
 
 REXCVAR_DEFINE_BOOL(banjo_native_reverb, true, "Banjo/Audio",
-                    "Run XAudio's reverb (stereo_room_t<float>::process, 0x826683D0) as native code "
+                    "Run XAudio's reverb (stereo_room_t<float>::process, 0x826508C0) as native code "
                     "instead of the recompiled guest code (bit-identical; the recompiled one costs "
                     "about a quarter of a Switch core)");
 REXCVAR_DEFINE_BOOL(banjo_native_reverb_verify, false, "Banjo/Audio",
@@ -136,13 +137,11 @@ inline void Barrier() { std::atomic_signal_fence(std::memory_order_seq_cst); }
 // PPC arithmetic as the recompiler emits it
 //-----------------------------------------------------------------------------
 
-// fmadds frD = frA * frC + frB: double(float(std::fma(A, C, B))) in double.
+// fmadds frD = frA * frC + frB as the processed generated code makes it: rex::ppc::FmaddsSingle (renut-ultimate,
+// 2026-11-12, port 96: tools/fma_single.py; on floats one single-precision fused multiply-add, the Xenon's one rounding;
+// REX_FMADDS_DOUBLE_ROUNDING, CMake BLUR_FMADDS_SINGLE OFF: double(float(std::fma(A, C, B))) as before).
 inline float Fmadds(float a, float c, float b) {
-#if defined(__aarch64__)
-  return float(std::fma(double(a), double(c), double(b)));
-#else
-  return float(double(a) * double(c) + double(b));  // a*c is exact in double: same value
-#endif
+  return float(::rex::ppc::FmaddsSingle(double(a), double(c), double(b)));
 }
 
 // fctidz, exactly the generated expression (only the low word is used).
@@ -259,7 +258,7 @@ inline F4 Opaque(F4 v) {
 
 // The generated code emits vmaddfp as simde_mm_add_ps(simde_mm_mul_ps(a, b), c). The app targets
 // are not built with -ffp-contract=off (only the SDK is; GCC defaults to "fast"), so on the Switch
-// GCC turns that into an fmla: the output loop at 0x82669AA8 fuses dry * in and rounds wet * late
+// GCC turns that into an fmla: the output loop at 0x82651F9C fuses dry * in and rounds wet * late
 // (checked in the disassembly with the app's flags; the scalar fmuls/fadds cannot fuse because
 // every result is rounded to float first). This file is built with the same flags as the generated
 // code, so the same idiom here shows which way they went. 1.000244140625^2 - 1.00048828125 is
@@ -284,14 +283,14 @@ constexpr u32 kRoomSize = 309712;  // end of the last vardelay_t<256> (+308656 +
 constexpr u32 kInputSpan = 1040;   // vardelay_t<16384>'s vector copy reads 260 floats
 
 // Guest image constants (read each call; they are .rdata).
-constexpr u32 kAddrOne = 0x82000D0C;       // C1 (crossfade total; occlusion 1 - a)
-constexpr u32 kAddrStep = 0x82000B78;      // crossfade step per sample
-constexpr u32 kAddrIdle = 0x82000D18;      // crossfade start when no new delay is pending
-constexpr u32 kAddrFadeScale = 0x8212C61C; // crossfade position -> samples * 2
-constexpr u32 kAddrCopyStep = 0x8219F26C;  // crossfade decrement of the vector copy path
-constexpr u32 kAddrLateOut = 0x8212499C;   // late network -> output allpasses
-constexpr u32 kAddrTapIn = 0x82124650;     // IIR section -> 4096 two-tap line
-constexpr u32 kAddrDry = 0x82F39960;       // vector: dry = this - wet
+constexpr u32 kAddrOne = 0x82000C1C;       // C1 (crossfade total; occlusion 1 - a)
+constexpr u32 kAddrStep = 0x82109854;      // crossfade step per sample
+constexpr u32 kAddrIdle = 0x82000C20;      // crossfade start when no new delay is pending
+constexpr u32 kAddrFadeScale = 0x82106E9C; // crossfade position -> samples * 2
+constexpr u32 kAddrCopyStep = 0x82109858;  // crossfade decrement of the vector copy path
+constexpr u32 kAddrLateOut = 0x820FF0B0;   // late network -> output allpasses
+constexpr u32 kAddrTapIn = 0x820FED64;     // IIR section -> 4096 two-tap line
+constexpr u32 kAddrDry = 0x82DA3340;       // vector: dry = this - wet
 
 struct Consts {
   float one, step, idle, fade_scale, copy_step, late_out, tap_in;
@@ -328,7 +327,7 @@ struct alignas(64) Scratch {
 // Block stages (256 samples; out[0] carries the previous block's last sample)
 //-----------------------------------------------------------------------------
 
-// vardelay_t<float, N>::preprocess (0x82669BC8 N=16384, 0x8266ACB0 N=256).
+// vardelay_t<float, N>::preprocess (0x826520B8 N=16384, 0x826531C0 N=256).
 // +4 crossfade xf, +8 delay A (new), +12 delay B (old), +16 target, +20 last, +24 write index, +32 line.
 // in may alias out + 2 (the final stage runs in place on a stack buffer): in[j] is always read
 // before out[j + 1] is written, as in the original.
@@ -377,8 +376,8 @@ void VarDelay(u8* o, const float* in, float* out, const Consts& k) {
   }
 
   if constexpr (kCopyPath) {
-    // 0x8266A028: both read windows and the write window inside the line without wrapping, and
-    // no fade pending (r6 at 0x82669BF0: unsigned |dA - dB| > 4 both ways, i.e. any difference).
+    // 0x82652508: both read windows and the write window inside the line without wrapping, and
+    // no fade pending (r6 at 0x826520E0: unsigned |dA - dB| > 4 both ways, i.e. any difference).
     const u32 wa = w - dA, wb = w - dB;
     const bool fading = (dA - dB > 4u) || (dB - dA > 4u);
     if (w + 256 < N && wb + 256 < N && wa + 256 < N && int32_t(wb) >= 0 && int32_t(wa) >= 0 && !fading) {
@@ -429,7 +428,7 @@ void VarDelay(u8* o, const float* in, float* out, const Consts& k) {
   StF(o + 20, out[256]);
 }
 
-// occlusion_t<float, 2>::preprocess (0x8266A218): two one-pole lowpasses in series.
+// occlusion_t<float, 2>::preprocess (0x82652708): two one-pole lowpasses in series.
 // +16 s1, +20 s2, +24 gain, +28 a. The guest's 8x unrolled loop fuses gain*(1-a)*x at position 0
 // and (x*gain)*(1-a) elsewhere. Both channels run in one loop (independent state) so their two
 // recurrences overlap.
@@ -472,7 +471,7 @@ void Occlusion2(u8* ol, const float* inl, float* outl, u8* orr, const float* inr
   r.Store(orr);
 }
 
-// threetap_t<float, N>::preprocess3 (0x8266A368 N=512, 0x8266A6D8 N=2048).
+// threetap_t<float, N>::preprocess3 (0x82652848 N=512, 0x82652BC0 N=2048).
 // +0 D0, +4 c0, +8 last1, +12 D1, +16 c1, +24 D2, +28 c2, +32 last2, +36 write index, +44 line.
 template <u32 N>
 void ThreeTap(u8* o, const float* in, float* out1, float* out2) {
@@ -537,7 +536,7 @@ void AllpassRun(u8* o, const float* x, float* y) {
   St32(o + 16, (w + 256) & M);
 }
 
-// allpass_t<float, N>::preprocess (0x8266A430 N=128, 0x8266A7A0 N=256, 0x8266A918 N=512), in place:
+// allpass_t<float, N>::preprocess (0x82652910 N=128, 0x82652C88 N=256, 0x82652F98 N=512), in place:
 // io[j] in, io[j] = previous output, io[256] = last.
 template <u32 N>
 void AllpassInPlace(u8* o, float* io) {
@@ -546,7 +545,7 @@ void AllpassInPlace(u8* o, float* io) {
   std::memcpy(io, y, 257 * sizeof(float));
 }
 
-// allpass_t<float, 512>::preprocess (0x8266AA90), out of place: out[0..255], and in[256] = last.
+// allpass_t<float, 512>::preprocess (0x82652E10), out of place: out[0..255], and in[256] = last.
 void Allpass512Out(u8* o, float* in, float* out) {
   alignas(16) float y[260];
   AllpassRun<512>(o, in, y);
@@ -554,7 +553,7 @@ void Allpass512Out(u8* o, float* in, float* out) {
   in[256] = y[256];
 }
 
-// twotap_t<float, 1024>::preprocess (0x8266AC08).
+// twotap_t<float, 1024>::preprocess (0x82653110).
 // +0 D0, +4 c0, +8 last1, +12 D1, +16 c1, +20 last2, +24 write index, +32 line.
 void TwoTap1024(u8* o, const float* in, float* out1, float* out2) {
   constexpr u32 M = 1023;
@@ -587,7 +586,7 @@ void TwoTap1024(u8* o, const float* in, float* out1, float* out2) {
 }
 
 //-----------------------------------------------------------------------------
-// Late network (0x82668EC8 loop): sections and their state
+// Late network (0x82651398 loop): sections and their state
 //-----------------------------------------------------------------------------
 
 // allpass_t<float, N>: +0 D, +4 b, +8 a, +12 y, +16 write index, +24 line.
@@ -806,7 +805,7 @@ struct LateState {
   }
 };
 
-// The late network as the guest runs it (0x82668EC8): one sample at a time. Every section reads
+// The late network as the guest runs it (0x82651398): one sample at a time. Every section reads
 // the other sections' outputs of the previous sample (the guest loads all of them at the top of the
 // iteration), so each sample computes the new outputs from the old ones and commits them at the
 // end. Operand order follows the guest's fmadds/fmuls (which product is fused changes from section
@@ -1448,7 +1447,7 @@ void Execute(PPCContext& ctx, u8* base, const Plan& p) {
   TwoTap1024(r + 145296, s.l_ap, s.al5, s.al6 + 2);
   TwoTap1024(r + 163416, s.r_ap, s.ar5, s.ar6 + 2);
 
-  // Cross-mix of the two input chains into the late network (0x8266888C). Position 1 of the guest's
+  // Cross-mix of the two input chains into the late network (0x82650D4C). Position 1 of the guest's
   // 8x unrolled left mix fuses differently from the other seven.
   {
     const float g = LdF(r + 96);
@@ -1472,7 +1471,7 @@ void Execute(PPCContext& ctx, u8* base, const Plan& p) {
   VarDelay<256, false>(r + 307600, s.al6 + 2, s.al6, k);
   VarDelay<256, false>(r + 308656, s.ar6 + 2, s.ar6, k);
 
-  // Output mix (0x82669AA8), vector ops with flush-to-zero like the original's vmulfp128/vmaddfp:
+  // Output mix (0x82651F9C), vector ops with flush-to-zero like the original's vmulfp128/vmaddfp:
   // front = (dry - wet) * in + wet * late, surround = 2 * wet * tail. vmaddfp is emitted as
   // add(mul()); whether the compiler fused that multiply is decided by the build flags (MixFuses).
   Barrier();

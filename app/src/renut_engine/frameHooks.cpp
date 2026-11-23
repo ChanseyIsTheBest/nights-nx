@@ -15,14 +15,14 @@
 
 REXCVAR_DEFINE_INT32(target_refreshRate, -1, "Nuts&Bolts/Performance", "The index for a given VSync setting. Options are: \n\t-1 = Unaffected\n\t0 = Immediate (Uncapped)\n\t1 = 60Hz\n\t2 = 30Hz (No Threshold)\n\t3 = 20Hz\n\t4 - 9 = Variants of 30Hz.").range(-1, 9);
 
-// Typed import of the original generated implementation at sub_823edeb8.
+// Typed import of the original generated implementation at sub_823bbe58.
 REX_IMPORT(__imp__rex_setParamInterval, setParamInterval, void(int));
 
 static std::once_flag g_refreshRateCallbackSet_once;
 bool isInKlungoGame = false;
 
 // TODO: Implement a callback so that we can set the vsync value and have it auto change.
-void refreshRate_hook(PPCRegister& r3) // Called at 823edeb8 (Start of the function)
+void refreshRate_hook(PPCRegister& r3) // Called at 823bbe58 (Start of the function)
 {
 	bool overrideTarget = false;
 	
@@ -45,16 +45,29 @@ void refreshRate_hook(PPCRegister& r3) // Called at 823edeb8 (Start of the funct
 	currentSyncVal = r3.u32;
 }
 
-void klungoConstruct_hook() // Called at 8246e7a8 (End of the function)
+void klungoConstruct_hook() // Called at 8244a7a0 (End of the function)
 {
 	isInKlungoGame = true;
 	setParamInterval(2);
 }
 
-void klungoDestruct_hook() // Called at 8246f62c (End of the function)
+void klungoDestruct_hook() // Called at 8244b744 (End of the function)
 {
 	isInKlungoGame = false;
 	setParamInterval(REXCVAR_GET(target_refreshRate));
+}
+
+// banjo-nx (2026-10-29, title update 3, from reNut upstream ab60251): Klungo's arcade 2 (the DLC) is its own game
+// object (sub_823C47E0 builds it, sub_823C68A8 tears it down), held at 30 fps the same way (config/renut_hooks.toml:
+// 0x823C519C and 0x823C6B80, the ends of those two).
+void klungoDlcConstruct_hook()
+{
+	klungoConstruct_hook();
+}
+
+void klungoDlcDestruct_hook()
+{
+	klungoDestruct_hook();
 }
 
 // =============================================================================

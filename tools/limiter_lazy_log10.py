@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """cpu_aggressive (proposed step, right after tools/localize_native.py): the XAudio limiter's localized copy
-(app/generated/hot/n_82B0D0C0.h, f_sub_82B0D0C0) computes log10 only where its result is used.
+(app/generated/hot/n_82B6A678.h, f_sub_82B6A678) computes log10 only where its result is used.
 
-The limiter (guest sub_82B0D0C0, 256 samples per channel per call) does per sample:
+The limiter (guest sub_82B6A678, 256 samples per channel per call) does per sample:
     env = (c76 * env + |x|) / c72;   db = log10(env);   if (env > T [r31+12]) gain = pow(10, -(db*20 - T)*c68*0.05)
     else gain = 1.0;  ... smoothing, output.
 The dB value (f1 after `bl rex_log10`, then f13 = float(f1) * 20) is read ONLY on the env > T path: on the other
@@ -10,7 +10,7 @@ path f13 is reloaded from [r31+52] before any read. On the console (package 21b)
 guest-thread samples, 88 % of them inside the inlined log10 / log (two dependent double divisions), and pow's code
 has 1 sample in 13,483: the env > T path is (almost) never taken. So nearly every log10 is dead work.
 
-Rewrite of the copy's loop body (the recompiled original sub_82B0D0C0, which the hook's guard compares against, is
+Rewrite of the copy's loop body (the recompiled original sub_82B6A678, which the hook's guard compares against, is
 NOT changed):
     l_f1.f64 = f27.f64;
     if (BANJO_LAZY_LOG10_ON && !(f27 > [r31+12])) { lz.Skip(f27); }          // the same compare as the fcmpu below
@@ -53,7 +53,7 @@ struct LazyLog10 {
   double x[4];
   uint8_t path[4];
   uint32_t n = 0;
-  // rex_log (0x8222A278): x == 1.0 / exponent all ones (inf, nan) / x <= 0 / the main path; the same tests in the same
+  // rex_log (0x821F92A8): x == 1.0 / exponent all ones (inf, nan) / x <= 0 / the main path; the same tests in the same
   // order (fcmpu with 1.0, the 0x7FF0 mask of the top half-word, fcmpu with 0.0 and bgt).
   [[gnu::always_inline]] static uint32_t Path(double v) {
     if (v == 1.0) return 0;
@@ -89,7 +89,7 @@ CALL = ('\t{ ctx.f1 = l_f1; ctx.f11 = l_f11; ctx.f12 = l_f12; ctx.f13 = l_f13; c
 BEFORE = ['\tl_f1.f64 = f27.f64;']
 AFTER = ['\tctx.fpscr.disableFlushMode();', '\tl_f13.f64 = double(float(l_f1.f64));',
          '\tf0.f64 = double(REX_LOAD_D_F32(r31.u32, 12));', '\tcr6.compare(f27.f64, f0.f64);',
-         '\tl_f13.f64 = double(float(l_f13.f64 * f29.f64));', '\tif (!cr6.gt) goto loc_82B0D1A0;']
+         '\tl_f13.f64 = double(float(l_f13.f64 * f29.f64));', '\tif (!cr6.gt) goto loc_82B6A758;']
 EXIT = '\t{ ctx.f11 = l_f11; ctx.f12 = l_f12; ctx.f13 = l_f13; ctx.r1 = l_r1; ctx.r3 = l_r3; return; }'
 # Replay: the call block's own hand-over for each kept skipped call. Only ctx.f1 (the argument) differs from what the
 # original handed over at that call; log10 reads no other register (rex_log10 and rex_log read f1 and r1 only), and
@@ -106,7 +106,7 @@ def main():
     ap.add_argument('--hot', required=True)
     ap.add_argument('--check', action='store_true')
     a = ap.parse_args()
-    path = os.path.join(a.hot, 'n_82B0D0C0.h')
+    path = os.path.join(a.hot, 'n_82B6A678.h')
     if not os.path.isfile(path):
         print('limiter_lazy_log10: %s missing: nothing done' % path)
         return
@@ -114,11 +114,11 @@ def main():
     if MARK in text:
         print('limiter_lazy_log10: already done')
         return
-    head = 'static void f_sub_82B0D0C0(PPCContext& __restrict ctx, uint8_t* base, [[maybe_unused]] S& s) {\n'
+    head = 'static void f_sub_82B6A678(PPCContext& __restrict ctx, uint8_t* base, [[maybe_unused]] S& s) {\n'
     i = text.find(head)
     j = text.find('\n}\n', i) if i >= 0 else -1
     if i < 0 or j < 0:
-        print('limiter_lazy_log10: f_sub_82B0D0C0 not found: nothing done')
+        print('limiter_lazy_log10: f_sub_82B6A678 not found: nothing done')
         return
     body = text[i:j].split('\n')
     sites = [k for k, l in enumerate(body) if l == CALL]
@@ -144,7 +144,7 @@ def main():
     k = sites[0]
     new = body[:k] + [
         '\tif (BANJO_LAZY_LOG10_ON && !(f27.f64 > double(REX_LOAD_D_F32(r31.u32, 12)))) {',
-        '\t\tlz.Skip(f27.f64);  // the dB value is read only on the env > T path (loc_82B0D1A0 overwrites it)',
+        '\t\tlz.Skip(f27.f64);  // the dB value is read only on the env > T path (loc_82B6A758 overwrites it; the base: loc_82B0D1A0)',
         '\t} else {',
         '\t' + REPLAY,
         '\t' + CALL,
@@ -153,7 +153,7 @@ def main():
     p = new.index('\tREX_FUNC_PROLOGUE();')
     new.insert(p + 1, '\t[[maybe_unused]] LazyLog10 lz;')
     text = text[:i] + '\n'.join(new) + text[j:]
-    proto = 'template <class S>\nstatic void f_sub_82B0D0C0(PPCContext& __restrict ctx, uint8_t* base, [[maybe_unused]] S& s);'
+    proto = 'template <class S>\nstatic void f_sub_82B6A678(PPCContext& __restrict ctx, uint8_t* base, [[maybe_unused]] S& s);'
     q = text.find(proto)
     if q < 0:
         print('limiter_lazy_log10: prototype not found: nothing done')
@@ -161,7 +161,7 @@ def main():
     text = text[:q] + SUPPORT + '\n' + text[q:]
     if not a.check:
         open(path, 'w', encoding='utf-8', newline='\n').write(text)
-    print('limiter_lazy_log10: f_sub_82B0D0C0 rewritten (1 call site, 1 exit)')
+    print('limiter_lazy_log10: f_sub_82B6A678 rewritten (1 call site, 1 exit)')
 
 
 if __name__ == '__main__':

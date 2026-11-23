@@ -6,6 +6,7 @@
  * @license     BSD 3-Clause License
  */
 
+#include <cstdio>  // port 193
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -16,6 +17,7 @@
 #include <optional>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <CLI/CLI.hpp>
 
@@ -583,7 +585,22 @@ std::vector<std::string> Init(int argc, char** argv) {
   CLI::App app{"", ""};
   app.allow_extras();
 
+  // pacman-nx (2026-11-03, 72c28ced): only the cvars the command line names. CLI11 checks each new option against every
+  // one before it, and each machine-made hot copy has a cvar: with 5,649 copies this loop held the console's main thread
+  // for about 90 s at every start, and a homebrew launch names none of them.
+  std::unordered_set<std::string_view> named;
+  for (int i = 1; i < argc; ++i) {
+    if (!argv || !argv[i]) continue;
+    std::string_view arg(argv[i]);
+    if (!arg.starts_with("--")) continue;
+    arg.remove_prefix(2);
+    arg = arg.substr(0, arg.find('='));
+    named.insert(arg);
+    if (arg.starts_with("no-")) named.insert(arg.substr(3));
+  }
+
   for (auto& entry : GetRegistryStorage()) {
+    if (!named.contains(std::string_view(entry.name))) continue;
     if (entry.type == FlagType::Boolean) {
       app.add_flag_function(
           "--" + entry.name + ",!--no-" + entry.name,
@@ -642,6 +659,20 @@ std::vector<std::string> Init(int argc, char** argv) {
   return positional;
 }
 
+void LoadConfigString(std::string_view toml_text, std::string_view origin) {
+  try {
+    auto config = toml::parse(toml_text, origin);
+    ApplyTomlTable(config, "");
+    REXLOG_DEBUG("Loaded config from {}", origin);
+  } catch (const toml::parse_error& err) {
+    REXLOG_ERROR("Failed to parse config {}: {}", origin, err.what());
+  }
+}
+
+namespace {
+std::string g_config_error;  // port 193: LoadConfig's last parse failure, empty when none
+}  // namespace
+
 void LoadConfig(const std::filesystem::path& config_path) {
   if (!std::filesystem::exists(config_path)) {
     REXLOG_DEBUG("Config file not found: {}", config_path.string());
@@ -654,18 +685,21 @@ void LoadConfig(const std::filesystem::path& config_path) {
     REXLOG_DEBUG("Loaded config from {}", config_path.string());
   } catch (const toml::parse_error& err) {
     REXLOG_ERROR("Failed to parse config {}: {}", config_path.string(), err.what());
+    // renut-ultimate (2026-11-20, port 193): TFU-nx's of 2026-11-12, as S4ep1-nx carries it
+    // (github.com/FurryLilManChild/S4ep1-nx, GPL-3.0, 0.5.1). The config loads before the log opens, so the line above
+    // was lost and a toml with one duplicate key silently applied nothing (TFU's first Switch test ran on defaults).
+    // stderr is open from the start (kept in memory with logging off, port 183, and in a crash report), and the reason
+    // is kept for the app to log again once the log is up (rex_app.cpp).
+    std::fprintf(stderr, "CONFIG NOT LOADED: %s: %s (line %u)\n", config_path.string().c_str(),
+                 std::string(err.description()).c_str(), static_cast<unsigned>(err.source().begin.line));
+    std::fflush(stderr);
+    g_config_error = config_path.string() + ": " + std::string(err.description()) + " (line " +
+                     std::to_string(err.source().begin.line) + ")";
   }
 }
 
-// nights-nx (2026-10-29, from sa2-nx): the application's built-in defaults (rex_app.cpp).
-void LoadConfigString(std::string_view toml_text, std::string_view origin) {
-  try {
-    auto config = toml::parse(toml_text, origin);
-    ApplyTomlTable(config, "");
-    REXLOG_DEBUG("Loaded config from {}", origin);
-  } catch (const toml::parse_error& err) {
-    REXLOG_ERROR("Failed to parse config {}: {}", origin, err.what());
-  }
+const std::string& LastConfigError() {
+  return g_config_error;
 }
 
 void ApplyEnvironment() {

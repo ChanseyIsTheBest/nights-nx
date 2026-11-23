@@ -244,7 +244,6 @@ function(renut_gpu_setup TARGET)
         ${RENUT_GPU_DIR}/backend/backend.cpp
         ${RENUT_GPU_DIR}/backend/gpu_profile.cpp
         ${RENUT_GPU_DIR}/backend/memory_report.cpp
-        ${RENUT_GPU_DIR}/backend/frame_double.cpp
         ${RENUT_GPU_DIR}/backend/native_window.cpp
         ${RENUT_GPU_DIR}/backend/present.cpp
         ${RENUT_GPU_DIR}/backend/queued.cpp
@@ -269,6 +268,7 @@ function(renut_gpu_setup TARGET)
         ${RENUT_GPU_DIR}/overlay/overlay_ui.cpp
         # Draws, targets, textures, shaders and formats.
         ${RENUT_GPU_DIR}/render/draw.cpp
+        ${RENUT_GPU_DIR}/render/fetch_filters.cpp  # renut-ultimate (2026-11-16, port 145): tw2de_nx's
         ${RENUT_GPU_DIR}/render/format.cpp
         ${RENUT_GPU_DIR}/render/graphics_options.cpp
         ${RENUT_GPU_DIR}/render/pipeline.cpp
@@ -285,10 +285,22 @@ function(renut_gpu_setup TARGET)
     renut_host_shader(${TARGET} overlay_ps ps_6_0)
     renut_host_shader(${TARGET} present_vs vs_6_0)
     renut_host_shader(${TARGET} present_ps ps_6_0)
+    renut_host_shader(${TARGET} present_lut_ps ps_6_0)  # vivapinata-nx (2026-11-12, vivapinata_present_lut)
     renut_host_shader(${TARGET} depth_resolve_ps ps_6_0)
     renut_host_shader(${TARGET} depth_resolve_ms_ps ps_6_0)
+    renut_host_shader(${TARGET} depth_resolve_float_ps ps_6_0)  # sasrt-nx (2026-11-08, sasrt_gpu_depth_resolve_float_ps)
     renut_host_shader(${TARGET} texture_mip_ps ps_6_0)
     renut_host_shader(${TARGET} resolve_copy_ps ps_6_0)  # banjo-nx (2026-10-18)
+    renut_host_shader(${TARGET} view_fp10_encode_ps ps_6_0)  # halo3-nx (2026-11-03)
+    # blur-nx (2026-11-10/11, port 76; its keys 216 and 220): a multisampled view resolved from the 1x target of its
+    # sample grid; one EDRAM view written into another (edram_inherit.hlsli, four sample forms).
+    renut_host_shader(${TARGET} sample_grid_resolve_ps ps_6_0)
+    renut_host_shader(${TARGET} edram_inherit_ps ps_6_0)
+    renut_host_shader(${TARGET} edram_inherit_src_ms_ps ps_6_0)
+    renut_host_shader(${TARGET} edram_inherit_dst_ms_ps ps_6_0)
+    renut_host_shader(${TARGET} edram_inherit_ms_ms_ps ps_6_0)
+    renut_host_shader(${TARGET} resolve_clamp_ps ps_6_0)  # sasrt-nx (2026-10-20): 16-bit fixed-point resolves
+    renut_host_shader(${TARGET} depth_restore_ps ps_6_0)  # sasrt-nx (2026-10-20): the EDRAM depth restore
     # banjo-nx (2026-10-21, banjo_renut_smaa): SMAA 1x (render/smaa.cpp; app/thirdparty/smaa, MIT).
     renut_host_shader(${TARGET} smaa_vs vs_6_0)
     renut_host_shader(${TARGET} smaa_edge_ps ps_6_0)
@@ -303,6 +315,8 @@ function(renut_gpu_setup TARGET)
     renut_host_shader(${TARGET} rectangle_list_gs gs_6_0)
     renut_host_shader(${TARGET} point_sprite_gs gs_6_0)
     renut_host_shader(${TARGET} stream_convert_cs cs_6_0)
+    renut_host_shader(${TARGET} fetch_copy_cs cs_6_0)  # sasrt-nx (2026-11-08, sasrt_gpu_fetch_copy_compute)
+    renut_host_shader(${TARGET} texel_readback_cs cs_6_0)  # sasrt-nx (2026-11-08, sasrt_gpu_texel_readback_compute)
     renut_host_shader(${TARGET} target_readback_cs cs_6_0)
 
     renut_xenos_shader_cache(${TARGET})

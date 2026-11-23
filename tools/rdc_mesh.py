@@ -14,6 +14,8 @@ IN = os.environ.get("RDC_IN")
 OUT = os.environ.get("RDC_OUT")
 LABEL = os.environ.get("RDC_LABEL", "")
 MAX = int(os.environ.get("RDC_MAX", "6"))
+# katamari-nx (2026-11-01): RDC_EVENTS = "e1,e2,..." describes only those draws, every post-VS vertex.
+EVENTS = {int(e) for e in os.environ.get("RDC_EVENTS", "").split(",") if e.strip()}
 log = open(os.path.join(OUT, "mesh.txt"), "w")
 
 
@@ -45,6 +47,8 @@ try:
             continue
         if not (a.flags & rd.ActionFlags.Drawcall) or LABEL not in last_label:
             continue
+        if EVENTS and a.eventId not in EVENTS:
+            continue
         controller.SetFrameEvent(a.eventId, True)
         say("event", a.eventId, last_label, "indices", a.numIndices)
         mesh = controller.GetPostVSData(0, 0, rd.MeshDataStage.VSOut)
@@ -72,8 +76,9 @@ try:
                 for i in range(3):
                     lo[i] = min(lo[i], ndc[i])
                     hi[i] = max(hi[i], ndc[i])
-                if len(firsts) < 4:
-                    firsts.append("(%.3g %.3g %.3g %.3g)" % (x, y, z, w))
+                if len(firsts) < (64 if EVENTS else 4):
+                    firsts.append("(%.3g %.3g %.3g %.3g)" % (x, y, z, w) if not EVENTS else
+                                  "(%.6f %.6f %.4f %.4f)" % (x, y, z, w))
             say("   post-VS vertices", count, "stride", stride, "NaN", nan, "w<=0", wneg,
                 "ndc x %.3f..%.3f y %.3f..%.3f z %.4f..%.4f" % (lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]))
             say("   first", " ".join(firsts))
@@ -83,9 +88,9 @@ try:
             for i, vb in enumerate(vbs[:2]):
                 if vb.resourceId == rd.ResourceId.Null():
                     continue
-                raw = controller.GetBufferData(vb.resourceId, vb.byteOffset, min(64, vb.byteSize or 64))
+                raw = controller.GetBufferData(vb.resourceId, vb.byteOffset, min(256 if EVENTS else 64, vb.byteSize or 64))
                 words = struct.unpack_from("%df" % (len(raw) // 4), raw)
-                say("   vb%d stride %d:" % (i, vb.byteStride), " ".join("%.4g" % w for w in words[:12]))
+                say("   vb%d stride %d:" % (i, vb.byteStride), " ".join("%.4g" % w for w in words[:64 if EVENTS else 12]))
         except Exception as e:
             say("   vb ?", e)
         done += 1

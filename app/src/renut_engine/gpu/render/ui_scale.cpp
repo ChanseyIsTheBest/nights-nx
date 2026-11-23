@@ -195,6 +195,7 @@ HostSurface *UiDepthAfterCompositeLocked(HostSurface *depth) {
   cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
   cmd->drawInstanced(3, 1, 0, 0);
   ++ui->writes;
+  ui->write_seq = ++g_surface_write_seq;  // blur-nx (2026-11-18): written whole now (as the colour pass below)
   RedirectDepthToUiLocked();
   banjo::renut_gpu::CountUiDepth(true);
   return ui;
@@ -267,6 +268,15 @@ bool UiScaleAfterCompositeLocked(HostSurface *surface) {
   cmd->drawInstanced(3, 1, 0, 0);
 
   ++ui->writes;  // banjo_renut_resolve_skip: the target changed
+  // blur-nx (2026-11-18, the band at the top of the race at any internal height but the display's): the pass writes the
+  // whole UI target, so it is written now, after every other view of its EDRAM. Without this its write_seq stayed at the
+  // last frame's HUD, and the HUD's first blended draw (InheritEdramBeforeDrawLocked, blur_renut_edram_inherit) took the
+  // post-processing buffers drawn over the same tiles earlier in the frame (1024x512, 512x256, 320x180 at base 000; at
+  // the console's scale, as the UI target is in handheld mode) over its top rows. On the console the composite is the
+  // newest write there. At the display's height no UI target is used, so 720 showed nothing.
+  ui->write_seq = ++g_surface_write_seq;
+  g_blur_color_write_last = ui->write_seq;
+  ui->blur_inherit_checked = g_blur_color_write_last;
   RedirectToUiSurfaceLocked();
   banjo::renut_gpu::CountUiUpscale(true);
   return true;

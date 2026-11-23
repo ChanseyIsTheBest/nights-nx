@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""nights-nx (2026-10-28, from peggle2-nx's tool: NiGHTS's XDK 21173 has Peggle 2's 21256 device layout, checked on
-559 identical-shape function pairs, docs/nights-notes.md). peggle2-nx (2026-10-19): Renut's hard-coded N&B Direct3D device offsets, rewritten to Peggle 2's (XDK 21256).
+"""peggle2-nx (2026-10-19): Renut's hard-coded N&B Direct3D device offsets, rewritten to Peggle 2's (XDK 21256).
 
 Renut (reNut by masterspike52, as banjo-nx carries it) was written against Banjo-Kazooie: Nuts & Bolts' Direct3D, whose
 private device layout differs from Peggle 2's (public part 0..0x2A70 unchanged; private fields move by +128..+412, see
@@ -87,7 +86,7 @@ def main():
         news = s['peggle'] if isinstance(s['peggle'], list) else [s['peggle']]
         # the line: its code (as recorded, or already rewritten), nearest to the recorded line
         best = None
-        for i in range(len(lines)):  # nights-nx: the whole file (banjo-nx's tree moved on since 10-19)
+        for i in range(max(0, line - 80), min(len(lines), line + 80)):
             t = lines[i].strip()
             if t == code:
                 if best is None or abs(i + 1 - line) < abs(best + 1 - line):
@@ -97,7 +96,7 @@ def main():
             want = code
             for o, n in zip(olds, news):
                 want, _ = replace_literal(want, o, n)
-            if any(l.strip() == want for l in lines):
+            if any(lines[i].strip() == want for i in range(max(0, line - 80), min(len(lines), line + 80))):
                 already += 1
                 continue
             missing.append('%s: code not found: %s' % (s['site'], code))

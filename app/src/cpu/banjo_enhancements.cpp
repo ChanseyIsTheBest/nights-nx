@@ -184,12 +184,26 @@ REXCVAR_DEFINE_BOOL(banjo_cpu_guest_cas_no_barrier, true, "Banjo/Enhancements",
                     "rex/thread/atomic.h) without the legacy builtin's trailing `dmb ish` on the A57; false puts the "
                     "barrier back at run time")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// blur-nx (2026-11-16, the 15 ms batch: docs/cpu-15ms-batch-1116.md): the generated code's guest compare-and-swap as
+// relaxed exclusives (#163) and its lwsync / eieio as `dmb ishld` + `dmb ishst` / `dmb ishst` (#164 / #165), each exact
+// with respect to the 360's memory model (lwarx / stwcx. order nothing there; lwsync does not order a store before a
+// later load; eieio orders stores). false gives the old form back (AArch64 only; the PC's x86 forms do not change).
+REXCVAR_DEFINE_BOOL(blur_guest_cas_relaxed, true, "Banjo/Enhancements",
+                    "The game's compare-and-swap as relaxed exclusives (ldxr / stxr), as the 360's lwarx / stwcx.; "
+                    "false: the sequentially consistent loop (ldaxr / stlxr) as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(blur_guest_fences_split, true, "Banjo/Enhancements",
+                    "The game's lwsync as dmb ishld + dmb ishst and eieio as dmb ishst (the PowerPC orderings); "
+                    "false: a full dmb ish for both, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // The SDK's two keys of those rounds are read and set by name: on the PC they live in the runtime DLL, whose
 // storage the app cannot link to. kernel_critsec_pcr_owner (xboxkrnl_rtl.cpp): a critical section's owner from the
 // PCR, no thread lookup. thread_signal_skip_idle (threading_posix.cpp, Switch only): no notify when nobody is blocked.
 static bool SdkKeyOn(const char* name) { return rex::cvar::GetFlagByName(name) == "true"; }
 #if defined(__aarch64__)
 extern "C" unsigned char g_rex_atomic_legacy_barrier;  // sdk/src/core/atomic_posix.cpp
+extern "C" unsigned char g_rex_guest_cas_seq_cst;      // the same file (blur-nx, 2026-11-16)
+extern "C" unsigned char g_rex_guest_fence_full;
 #endif
 
 // Non-CPU: the handheld GPU profile (from sa2-nx's sa2_gpu_boost; renut_app.h calls it once before setup). Asks the
@@ -212,6 +226,18 @@ REXCVAR_DECLARE(bool, masseffect_gpu_marks_categories);   // GPU time per pass c
 REXCVAR_DEFINE_BOOL(switch_profile_stacks, false, "Banjo/Enhancements",
                     "Switch: the SDK's sampling profiler records every thread's pc (logs/rex/rex_profile.log), as an "
                     "empty logs/rex/stacks_profile.flag does. On in the A/B and profile configs")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// blur-nx (2026-11-16, the 15 ms batch): the sampler's interval in ms (read by name too). Each sample pauses one game
+// thread from a thread above all of them; 5 ms keeps ~24,000 samples in a two-minute race window for the CPU tables
+// at a fifth of the pauses.
+REXCVAR_DEFINE_INT32(switch_profile_stacks_ms, 1, "Banjo/Enhancements",
+                     "Switch: the SDK sampler's interval in milliseconds (1-100; each sample pauses one game thread)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// blur-nx (2026-11-17, the Renut audit's #29): read by name by the SDK's profiler thread (switch_perf.cpp).
+REXCVAR_DEFINE_BOOL(switch_perf_count_calls, true, "Banjo/Enhancements",
+                    "Switch: the wrapped libnx calls (kicks, GPU mappings, cache cleans, yields and sleeps) counted for "
+                    "the 10 s report's libnx line, a clock read and two atomics each. false skips that (a shipping "
+                    "config that reads no reports)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // The native copies of hot game functions (src/cpu/banjo_hot_guest.cpp, from sa2-nx): one key per function
@@ -275,6 +301,9 @@ void ApplyMasterSwitches() {
 #if defined(__aarch64__)
   // banjo_cpu_guest_cas_no_barrier: off puts the legacy `dmb ish` back after every compare-and-swap.
   g_rex_atomic_legacy_barrier = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_cpu_guest_cas_no_barrier)) ? 0 : 1;
+  // blur-nx (2026-11-16): the relaxed compare-and-swap and the split fences (the keys above).
+  g_rex_guest_cas_seq_cst = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(blur_guest_cas_relaxed)) ? 0 : 1;
+  g_rex_guest_fence_full = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(blur_guest_fences_split)) ? 0 : 1;
 #endif
   CodegenChecksInit();
   if (REXCVAR_GET(banjo_cpu_enhancements)) {
@@ -499,6 +528,7 @@ void LogEnhancements() {
               REXCVAR_GET(masseffect_gpu_marks_categories) ? "on" : "off");
   // Every helper that has a form for one processor only, against plain C++ references (banjo_forms_selfcheck.cpp).
   FormsSelfCheck();
+  BlurMicrobench();
 }
 
 }  // namespace banjo

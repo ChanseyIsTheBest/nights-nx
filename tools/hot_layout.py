@@ -21,6 +21,17 @@ import os
 import re
 import sys
 
+
+def gen_file(gen, suffix):
+    """renut-ultimate (2026-11-19, port 186; found by sasrt-nx's sync): the generator names its files after the project
+    (<project>_pch.h, <project>_init.cpp, <project>_recomp.N.cpp): renut_ in the base, a port's own name otherwise."""
+    for name in sorted(os.listdir(gen)):
+        m = re.fullmatch(r'(\w+)_recomp\.\d+\.cpp', name)
+        if m:
+            return os.path.join(gen, m.group(1) + '_' + suffix)
+    return os.path.join(gen, 'renut_' + suffix)
+
+
 MARK = '// banjo-nx: hot (tools/hot_layout.py)'
 FUNC_RE = re.compile(r'^DEFINE_REX_FUNC\((\w+)\) \{$')
 PCH_MACRO = '''
@@ -65,7 +76,7 @@ def main():
     if os.path.isfile(listed):
         hot = {l.strip() for l in open(listed, encoding='utf-8') if l.strip() and not l.startswith('#')}
     restore = '--restore' in args
-    pch = os.path.join(gen, 'renut_pch.h')
+    pch = gen_file(gen, 'pch.h')
     if not restore and os.path.isfile(pch):
         p = open(pch, encoding='utf-8').read()
         if 'REX_HOT_DECL' not in p:

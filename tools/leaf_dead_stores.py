@@ -375,6 +375,14 @@ def sections(img):
     return out
 
 
+COPY_LISTS = {os.path.normcase(os.path.join(ROOT, 'app', 'src', 'cpu', 'hot', n))
+              for n in ('localized.txt', 'localized_bulk.txt')}
+NON_HOOK_LIST = os.path.normcase(os.path.join(ROOT, 'app', 'indirect_promotions.txt'))  # blur-nx (2026-11-12): below
+# sasrt-nx (2026-11-11, port 74; its idea 37): every function's LiveOut, for tools/localize_native.py (a copy writes back
+# at a return only the volatile registers a caller can read).
+LIVE_OUT_JSON = os.path.join(ROOT, 'out', 'leaf_live_out.json')
+
+
 def address_taken(gen, image, starts, bodies):
     pch = open(glob.glob(os.path.join(gen, '*_pch.h'))[0], encoding='utf-8').read()
     value = lambda name: int(re.search(r'#define %s (0x[0-9A-Fa-f]+)' % name, pch).group(1), 16)
@@ -410,6 +418,18 @@ def address_taken(gen, image, starts, bodies):
                     if a in starts and a not in resolved:
                         taken[a].add('lis pair')
     taken[ENTRY_POINT].add('entry point')
+    # blur-nx (2026-11-12, from sasrt-nx's guard finding): a promoted indirect call with several targets is one line
+    # (`if (REX_PROMOTED_IS(...)) { ... sub_A(ctx, base); } else if (REX_PROMOTED_IS(...)) { ... sub_B(ctx, base); }`),
+    # and the parse below records its first target only as the node's call: B's LiveOut would miss what this caller
+    # reads after it. Every promoted target is an indirect call's target, so its LiveOut must be everything anyway:
+    # marked here. In Blur every one of the 34 later targets was already taken by a data word or a lis pair (no change).
+    promoted = re.compile(r'REX_PROMOTED_IS\(ctr\.u32, 0x([0-9A-F]{8})u\)')
+    for addr, (_, lines) in bodies.items():
+        for line in lines:
+            if 'REX_PROMOTED_IS' in line:
+                for t in promoted.findall(line):
+                    if int(t, 16) in starts:
+                        taken[int(t, 16)].add('promoted target')
     # Every address the port's own sources name (hooks, natives, verify, host code calling guest functions).
     sources = [os.path.join(ROOT, 'app', 'src'), os.path.join(ROOT, 'sdk', 'src'), os.path.join(ROOT, 'sdk', 'include')]
     # Not app/thunks.toml: it names every jump thunk and its target for tools/thunk_calls.py; a thunk is a tail call
@@ -424,6 +444,25 @@ def address_taken(gen, image, starts, bodies):
         paths = [root] if os.path.isfile(root) else [os.path.join(d, f) for d, _, fs in os.walk(root) for f in fs
                                                       if f.endswith(('.cpp', '.h', '.hpp', '.inc', '.c', '.toml', '.txt'))]
         for path in paths:
+            # sasrt-nx (2026-11-11, port 74; its idea 37): the localized copies' own lists (tools/localize_native.py)
+            # name functions without calling them: a copy's hook runs for the same direct callers, the copy or the
+            # original. (Their calls are still hooked sub_X calls, tools/direct_calls.py: main() below counts those
+            # as calls of the original.) SASRT_LIVE_OUT_LISTS_NAMED=1: counted again. (tools/dead_ctx_defs.py reads
+            # this function too: its analysis sees the same.)
+            if (os.environ.get('SASRT_LIVE_OUT_LISTS_NAMED', '0') != '1' and
+                    os.path.normcase(os.path.abspath(path)) in COPY_LISTS):
+                continue
+            # blur-nx (2026-11-12, from sasrt-nx's finding that day): two more kinds of list name functions without
+            # hooking or calling them. app/indirect_promotions.txt names each promoted site's function and its targets:
+            # the promotion is a guarded direct call in the generated code (tools/indirect_calls.py --promote), an edge
+            # this analysis reads there, and a target is taken anyway by the data word that makes it indirect. The hand
+            # natives' *.draft.txt are the candidate lists the natives were written from (a native that exists is named
+            # in hand.txt and in its header, both still read). In Blur they alone made 216 functions "taken", 133 of
+            # them in the console race (32.5 ms a frame of CPU, sub_822BEDD0 the first), so their copies wrote back
+            # every volatile register at a return. BLUR_LIVE_OUT_LISTS_NAMED=1: counted again.
+            if os.environ.get('BLUR_LIVE_OUT_LISTS_NAMED', '0') != '1' and (
+                    os.path.normcase(os.path.abspath(path)) == NON_HOOK_LIST or path.endswith('.draft.txt')):
+                continue
             try:
                 text = open(path, encoding='utf-8', errors='ignore').read()
             except OSError:
@@ -523,6 +562,31 @@ def main():
         for node in nodes:
             if node.call and not node.call[1] and node.call[0] in natives:
                 node.call = (node.call[0], True)
+    # sasrt-nx (2026-11-11, port 74; its idea 37; sasrt-nx's round A audit, finding 5): a call through the hook of a
+    # localized copy (app/src/cpu/hot/localized.txt, localized_bulk.txt) runs the copy, made from this tree's own
+    # statements of the function, or the original: it reads what the original reads and writes what it writes, less the
+    # write-backs this analysis finds dead. Such a call counts as a call of the original, for the functions nothing else
+    # names or hooks (not in `taken`: an app hook or hand native is named in its source). SASRT_LIVE_OUT_LISTS_NAMED=1:
+    # unknown, as before.
+    copies_known = 0
+    if os.environ.get('SASRT_LIVE_OUT_LISTS_NAMED', '0') != '1':
+        listed = set()
+        for path in COPY_LISTS:
+            try:
+                for line in open(path, encoding='utf-8', errors='ignore'):
+                    m = re.match(r'\s*(?:sub_)?([0-9A-Fa-f]{8})\b', line)
+                    if m:
+                        listed.add(int(m.group(1), 16))
+            except OSError:
+                pass
+        copies = {addr for addr in listed if addr in starts and addr not in taken}
+        for nodes in parsed.values():
+            for node in nodes:
+                if node.call and not node.call[1] and node.call[0] in copies:
+                    node.call = (node.call[0], True)
+                    copies_known += 1
+        print('leaf_dead_stores: %d calls through %d localized copies\' hooks counted as calls of the original' % (
+            copies_known, len(copies)))
     print('leaf_dead_stores: %d functions, %d guest instructions; %d functions have an address outside direct calls' % (
         len(parsed), sum(len(v) for v in parsed.values()), len(taken)))
     reasons = collections.Counter(r for why in taken.values() for r in why)
@@ -646,6 +710,15 @@ def main():
         else:
             why['everything live after a call site'] += 1
     print('  leaf functions: ' + ', '.join('%s %d' % kv for kv in why.most_common()))
+
+    # sasrt-nx (2026-11-11, port 74; its idea 37): the LiveOut of every function, for the copies, with the tree it
+    # belongs to (localize_native.py uses it only for that tree; not written by --check runs).
+    if not a.check:
+        import json
+        with open(LIVE_OUT_JSON + '.tmp', 'w') as f:
+            json.dump({'gen': os.path.abspath(a.gen),
+                       'live_out': {'%08X' % addr: live_out[addr] for addr in sorted(live_out)}}, f)
+        os.replace(LIVE_OUT_JSON + '.tmp', LIVE_OUT_JSON)
 
     # 4. The leaf write-backs.
     stores = dead = funcs_with = 0

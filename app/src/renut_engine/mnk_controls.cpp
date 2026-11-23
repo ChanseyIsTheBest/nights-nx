@@ -147,7 +147,7 @@ const renut::mnk::BindInfo kBindInfo[kBindCount] = {
 };
 
 // -----------------------------------------------------------------------------
-// Xbox pad button bits, as the game's own button word uses them. sub_8239FF20
+// Xbox pad button bits, as the game's own button word uses them. sub_8236CB80
 // takes XINPUT_GAMEPAD.wButtons verbatim and adds two synthetic bits for the
 // triggers past their threshold, so our word has to use the same layout.
 // -----------------------------------------------------------------------------
@@ -165,8 +165,8 @@ constexpr uint32_t kBtnA = 0x1000;
 constexpr uint32_t kBtnB = 0x2000;
 constexpr uint32_t kBtnX = 0x4000;
 constexpr uint32_t kBtnY = 0x8000;
-constexpr uint32_t kBtnLTrigger = 0x10000;  // synthetic, set by sub_8239FF20
-constexpr uint32_t kBtnRTrigger = 0x20000;  // synthetic, set by sub_8239FF20
+constexpr uint32_t kBtnLTrigger = 0x10000;  // synthetic, set by sub_8236CB80
+constexpr uint32_t kBtnRTrigger = 0x20000;  // synthetic, set by sub_8236CB80
 
 // Mouse pixels per frame that reach full stick tilt at 1.0x sensitivity.
 constexpr float kPixelsFullTilt = 25.0f;
@@ -522,8 +522,8 @@ inline void WrBEF32(uint8_t* base, uint32_t addr, float value) {
 }
 
 // -----------------------------------------------------------------------------
-// One frame of pad state, as sub_8239FF20 lays it out on the stack before
-// handing it to sub_821FBD90:
+// One frame of pad state, as sub_8236CB80 lays it out on the stack before
+// handing it to sub_821CB628:
 //
 //   +0x00 u32   buttons pressed this frame (new & ~old)
 //   +0x04 u32   buttons released this frame (old & ~new)
@@ -748,8 +748,8 @@ const BindInfo* BindList(std::size_t& out_count) {
 }  // namespace renut::mnk
 
 // =============================================================================
-// Midasm hook: stand in for a pad when there isn't one (sub_8239FC08, guest
-// 0x8239FC6C -- right after the XInputGetState(0..3) scan finishes filling
+// Midasm hook: stand in for a pad when there isn't one (sub_8236C818, guest
+// 0x8236C884 -- right after the XInputGetState(0..3) scan finishes filling
 // dword_82F9DFEC and before the disconnect sweep runs).
 //
 // Playing on keyboard alone with no pad plugged in otherwise leaves every slot
@@ -771,7 +771,7 @@ void renutMnk_PadConnectMask() {
   if (!base) {
     return;
   }
-  constexpr uint32_t kConnectedMask = 0x82F9DFEC;
+  constexpr uint32_t kConnectedMask = 0x82E0B14C;
   if (RdBE32(base, kConnectedMask) != 0) {
     return;  // a real pad is present -- don't add a second one
   }
@@ -780,12 +780,12 @@ void renutMnk_PadConnectMask() {
 }
 
 // =============================================================================
-// Midasm hook: make the per-pad poll succeed (sub_8239FC08, guest 0x8239FC84 --
+// Midasm hook: make the per-pad poll succeed (sub_8236C818, guest 0x8236C8A4 --
 // on the `cmplwi r3, 0` that tests the XInputGetState result).
 //
 // r29 points at the pad object, whose first word is its user index; r1+0x50 is
 // the XINPUT_STATE the call filled in. When our slot has no physical pad the
-// call returns ERROR_DEVICE_NOT_CONNECTED and sub_8239FF20 is skipped entirely,
+// call returns ERROR_DEVICE_NOT_CONNECTED and sub_8236CB80 is skipped entirely,
 // so we hand it a zeroed but "successful" state and let the state builder run.
 // renutMnk_ApplyPadState then fills that empty frame in with the real
 // keyboard/mouse input.
@@ -810,7 +810,7 @@ void renutMnk_PadPollResult(PPCRegister& r1, PPCRegister& r3, PPCRegister& r29) 
 
 // =============================================================================
 // Midasm hook: write our movement into the frame the game is about to commit
-// (sub_8239FF20, guest 0x823A00A4 -- on the `bl sub_821FBD90` handoff).
+// (sub_8236CB80, guest 0x8236CD04 -- on the `bl sub_821CB628` handoff).
 //
 // r3 = pad state object (padObject + 0x34), r4 = the 0x28-byte frame block.
 //
@@ -968,7 +968,7 @@ void renutMnk_ApplyPadState(PPCRegister& r3, PPCRegister& r4) {
 }
 
 // =============================================================================
-// Override: XInputGetKeystroke (guest 0x821FD318).
+// Override: XInputGetKeystroke (guest 0x821CC9E8).
 //
 // The XUI front end -- main menu, pause menu, file select -- navigates off this
 // and never looks at the analog pad state, so injecting movement alone gets you
@@ -981,9 +981,9 @@ void renutMnk_ApplyPadState(PPCRegister& r3, PPCRegister& r4) {
 // missing pad we soften that to EMPTY: "no keystroke waiting" keeps the menu
 // alive, "no controller" makes it stop listening.
 // =============================================================================
-// nights-nx: N&B links XInputGetKeystroke as a guest function (rex_XInputGetKeystroke); NiGHTS's is not named or
-// hooked yet, so the software keyboard's keystrokes are not fed in (NIGHTS_NB_KEYSTROKE_HOOK).
-#if NIGHTS_NB_KEYSTROKE_HOOK
+// katamari-nx (2026-10-30): rex_XInputGetKeystroke is the name N&B's config gives its XAPI keystroke function; Beautiful
+// Katamari's is not named yet, so this hook is not built (the pad path, XInputGetState, is the SDK's and unchanged).
+#if KATAMARI_BANJO_ADDRESS_HOOKS
 REX_EXTERN(__imp__rex_XInputGetKeystroke);
 
 // The X_ERROR_* macros expand to a cast through rex::X_RESULT.
@@ -1016,4 +1016,4 @@ REX_HOOK_RAW(rex_XInputGetKeystroke) {
     ctx.r3.u64 = static_cast<uint32_t>(X_ERROR_EMPTY);
   }
 }
-#endif  // NIGHTS_NB_KEYSTROKE_HOOK
+#endif  // KATAMARI_BANJO_ADDRESS_HOOKS

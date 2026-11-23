@@ -61,22 +61,22 @@ DrawDirect BeginWriterDirect(const uint8_t* base, uint32_t r3, uint32_t& depth, 
 void EndDrawDirect(uint8_t* base, const DrawDirect& d, uint32_t& depth);
 // D3DDevice_Swap's device (banjo_d3d_records: the writers' device when their r3 is not a device).
 void NoteMainDevice(uint32_t device);
-// After Direct3D's space function (sub_82210AB0: the kick and the next segment) gave `device` a new segment, inside a
+// After Direct3D's space function (sub_821DFFF0: the kick and the next segment) gave `device` a new segment, inside a
 // hooked call (`depth` > 0): the call's records are made of what it writes in the new segment.
 // `old_end`: the device's write pointer before the space function ran (the call's last word in the old segment).
 void NoteSegmentSwitch(const uint8_t* base, uint32_t device, uint32_t depth, uint32_t old_end);
-// banjo_d3d_host_submit (step 6): Direct3D's kick (sub_82210408: r3 the device, r4 its list of segments as (length,
+// banjo_d3d_host_submit (step 6): Direct3D's kick (sub_821DF948: r3 the device, r4 its list of segments as (length,
 // address) pairs, r5 how many), around the original. KickBegin returns true when KickEnd must be called.
 bool KickBegin(const uint8_t* base, uint32_t device, uint32_t list, uint32_t count);
 void KickEnd();
-// sub_826571D8 (r3 the device, r4 the words it copies into the primary ring, r5 how many), before the original.
+// sub_8263FD60 (r3 the device, r4 the words it copies into the primary ring, r5 how many), before the original.
 void RingWords(const uint8_t* base, uint32_t device, uint32_t words, uint32_t count);
 
 // Called by the ring thread after it writes the read pointer back: wakes the game's D3D GPU wait
-// (src/native/me_ring_wait.cpp, sub_8222FA98).
+// (src/native/me_ring_wait.cpp, sub_821FEBE0).
 void NotifyRingProgress();
 
-// banjo-nx: one iteration of the game's D3D wait for ring space (Optimization_Hook, sub_8228F558): sleeps until the
+// banjo-nx: one iteration of the game's D3D wait for ring space (Optimization_Hook, sub_8225D370): sleeps until the
 // ring thread makes progress the game has not seen yet, or masseffect_wait_ring_max_us (src/me/me_ring_wait.cpp).
 void WaitRingProgress();
 

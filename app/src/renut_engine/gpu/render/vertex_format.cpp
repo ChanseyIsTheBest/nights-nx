@@ -10,6 +10,7 @@
 
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/ultimate.h"
 #include "shader_common.h"
 
 #if defined(__aarch64__)
@@ -602,7 +603,9 @@ HostVertexLayout BuildHostVertexLayout(const GuestVertexElement *elements, u32 c
     if (host.host_format == plume::RenderFormat::UNKNOWN)
       host.swap_halves = false;
     if (host.host_format != plume::RenderFormat::UNKNOWN) {
-      host.conversion = ElementConversion::Copy32;
+      // vivapinata-nx (2026-11-03, distant creatures dark): see FiniteWords.
+      host.conversion = banjo::renut_gpu::VertexFiniteOn() && copy_type.format == k32_Float ? ElementConversion::Copy32Finite
+                                                                                          : ElementConversion::Copy32;
       host.host_size = info.dwords * 4;
       host.components = info.components;
     } else {
@@ -805,6 +808,35 @@ void CopyElementWords(const u8 *src, u32 src_stride, u8 *dst, u32 dst_stride, u3
   }
 }
 
+// vivapinata-nx (2026-11-03, distant creatures dark): Viva Pinata's creature meshes keep a specular power per vertex as a 32-bit
+// float (an element of its own), with +infinity (0x7F800000) on vertices that have no highlight, whose highlight colour is black. On
+// the Xenos 0 times anything is 0, so the pow the pixel shader does, exp2(power * log2(x)) * colour, comes to 0 there. Our shaders
+// follow IEEE rules: infinity times 0 is NaN, and a NaN in the highlight made the pixel's whole colour NaN. The largest finite float
+// gives the same powers without a NaN, and costs one test a vertex for this rare kind of element, on the CPU.
+void FiniteWords(u8 *dst, u32 dst_stride, u32 count) {
+  for (u32 i = 0; i < count; ++i, dst += dst_stride) {
+    u32 word;
+    std::memcpy(&word, dst, 4);
+    if ((word & 0x7F800000u) == 0x7F800000u) {
+      word = (word & 0x80000000u) | 0x7F7FFFFFu;
+      std::memcpy(dst, &word, 4);
+    }
+  }
+}
+
+// renut-ultimate (audit, 2026-11-07): no word FiniteWords would change in one element of 'count' guest vertices (the
+// element's first word at 'src'), read through the stream's endian mode.
+bool ElementAllFinite(const u8 *src, u32 src_stride, u32 count, u32 endian) {
+  u32 found = 0;
+  for (u32 i = 0; i < count; ++i, src += src_stride) {
+    u32 word;
+    std::memcpy(&word, src, 4);
+    word = SwapDword(word, endian);
+    found |= u32((word & 0x7F800000u) == 0x7F800000u);
+  }
+  return !found;
+}
+
 } // namespace
 
 void ConvertVertices(const HostVertexStream &stream, const u8 *guest, u32 guest_stride,
@@ -817,9 +849,25 @@ void ConvertVertices(const HostVertexElement *elements, u32 element_count, u32 h
                      u32 guest_stride, u32 vertex_count, u32 endian, u8 *host) {
   const std::span<const HostVertexElement> stream_elements(elements, element_count);
   bool copy_only = true, same_layout = host_stride_in == guest_stride && guest_stride % 4 == 0;
+  bool finite_elements = false;  // renut-ultimate (audit, 2026-11-07)
   for (const HostVertexElement &element : stream_elements) {
-    copy_only &= element.conversion == ElementConversion::Copy32 && !element.swap_halves;
+    const bool finite = element.conversion == ElementConversion::Copy32Finite;
+    finite_elements |= finite;
+    copy_only &= (element.conversion == ElementConversion::Copy32 || finite) && !element.swap_halves;
     same_layout &= element.host_offset == element.guest_offset;
+  }
+  // renut-ultimate (audit, 2026-11-07): port 15's finite single floats leave the stream the one-pass swap below when none of
+  // the draw's vertices has a word FiniteWords would change (the chunked path otherwise, which applies it).
+  if (copy_only && same_layout && finite_elements) {
+    for (const HostVertexElement &element : stream_elements) {
+      if (element.conversion == ElementConversion::Copy32Finite &&
+          !ElementAllFinite(guest + element.guest_offset, guest_stride, vertex_count, endian)) {
+        copy_only = false;
+        break;
+      }
+    }
+  } else if (finite_elements) {
+    copy_only = false;
   }
   // Swapping the halves after any endian swap is the endian mode ^ 3
   // (8in32 <-> 8in16, none <-> 16in32).
@@ -867,6 +915,8 @@ void ConvertVertices(const HostVertexElement *elements, u32 element_count, u32 h
         // host little-endian words
         CopyElementWords(src, guest_stride, dst, host_stride, count, element.host_size / 4,
                          element.swap_halves ? endian ^ kSwapHalves : endian);
+        if (element.conversion == ElementConversion::Copy32Finite)  // vivapinata-nx (2026-11-03)
+          FiniteWords(dst, host_stride, count);
       }
     }
     std::memcpy(host + size_t(first) * host_stride, chunk, size_t(count) * host_stride);

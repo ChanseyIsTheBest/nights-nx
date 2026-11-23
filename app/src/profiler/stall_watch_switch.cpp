@@ -1,13 +1,20 @@
 #include "profiler/switch_stall_watch.h"
 #include "profiler/switch_cpu_profiler.h"
 
+#include <rex/system/wait_registry.h>
+
 #include <switch.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <string>
+
+// Port 167: sdk/src/system/xthread.cpp, every guest thread's guest call chain for the on-demand dump.
+extern "C" size_t RexGuestCallChains(char* out, size_t cap);
 
 // See os/switch_stall_watch.h. Adapted from the watchdog of battd_nx (source/diag.c): threads are only
 // paused to read their registers and copy the top of their stack, and resumed before anything is formatted,
@@ -36,6 +43,16 @@ namespace
     void (*g_reporter)(std::string&) = nullptr;
     Thread g_thread;
     bool g_started = false;
+
+    // blur-nx (2026-11-14): the guest waits in each dump, and the quiet and on-demand triggers (switch_stall_watch.h).
+    constexpr size_t MAX_WAITS = 256;
+    constexpr uint64_t QUIET_REDUMP_NS = 30'000'000'000ull; // the second quiet dump, if reads have not resumed
+    constexpr int MAX_QUIET_DUMPS = 2;
+    constexpr int TRIGGER_POLLS = 4;                        // the stall_dump file is looked for once a second
+    bool g_waits = false;
+    uint64_t g_quietTicks = 0;                              // 0: no quiet trigger
+    std::string g_triggerPath;                              // <log folder>stall_dump
+    rex::system::waitreg::WaitView g_waitViews[MAX_WAITS];
 
     uint64_t g_base = 0;
     uint64_t g_size = 0;
@@ -170,7 +187,90 @@ namespace
         out += text;
     }
 
-    void Dump(int episode, int dump, uint64_t now, uint64_t lastFrame)
+    const char* TypeName(uint32_t type)
+    {
+        static const char* const names[] = { "Undefined", "Enumerator", "Event", "File", "IOCompletion", "Module", "Mutant",
+            "NotifyListener", "Semaphore", "Session", "Socket", "SymbolicLink", "Thread", "Timer" };
+        return type < sizeof(names) / sizeof(names[0]) ? names[type] : "object";
+    }
+
+    // blur-nx (2026-11-14): every guest thread blocked in a wait right now (rex/system/wait_registry.h), the longest
+    // first, named from the threads just captured.
+    void AppendWaits(std::string& out, size_t threadCount, double sinceReadS)
+    {
+        namespace wr = rex::system::waitreg;
+        const uint64_t nowNs = wr::NowNs();
+        const size_t n = wr::CopyWaits(g_waitViews, MAX_WAITS);
+        std::sort(g_waitViews, g_waitViews + n,
+            [](const wr::WaitView& a, const wr::WaitView& b) { return a.since_ns < b.since_ns; });
+
+        char line[384];
+        snprintf(line, sizeof(line), "[stall]   guest waits blocked now: %zu; file reads so far %llu (%.1f MB), the last %.1f s ago\n",
+            n, (unsigned long long)wr::FileReads(), double(wr::FileReadBytes()) / 1e6, sinceReadS);
+        out += line;
+        for (size_t i = 0; i < n; i++)
+        {
+            const wr::WaitView& w = g_waitViews[i];
+            char who[64];
+            snprintf(who, sizeof(who), "thread 0x%x", w.host_thread);
+            for (size_t t = 0; t < threadCount; t++)
+            {
+                if (g_captures[t].handle == w.host_thread && w.host_thread != 0)
+                {
+                    snprintf(who, sizeof(who), "%.47s", g_captures[t].name);
+                    break;
+                }
+            }
+            char what[96];
+            if (w.kind == wr::kWaitAny || w.kind == wr::kWaitAll)
+                snprintf(what, sizeof(what), "%s of %u (the first: %s 0x%08x)", w.kind == wr::kWaitAny ? "any" : "all",
+                    w.count, TypeName(w.object_type), w.handle);
+            else
+                snprintf(what, sizeof(what), "%s0x%08x (%s)", w.kind == wr::kSignalAndWait ? "(signal and wait) " : "",
+                    w.handle, TypeName(w.object_type));
+            char timeout[32];
+            if (w.timeout_ms < 0)
+                snprintf(timeout, sizeof(timeout), "no timeout");
+            else
+                snprintf(timeout, sizeof(timeout), "timeout %lld ms", (long long)w.timeout_ms);
+            const double forS = nowNs > w.since_ns ? double(nowNs - w.since_ns) / 1e9 : 0.0;
+            snprintf(line, sizeof(line), "[stall]     %s waits on %s for %.1f s, %s", who, what, forS, timeout);
+            out += line;
+            if (w.guest[0])  // port 167 (from fnxf_xiii): who in the game waits
+            {
+                snprintf(line, sizeof(line), "; guest LR 0x%08x, callers 0x%08x 0x%08x 0x%08x 0x%08x", w.guest[0],
+                    w.guest[1], w.guest[2], w.guest[3], w.guest[4]);
+                out += line;
+            }
+
+            const wr::SignalView s = wr::FindSignal(w.handle);
+            if (!s.seen)
+                out += "; never set or released (since the watchdog started)";
+            else
+            {
+                if (s.sets != 0)
+                {
+                    const bool after = s.last_set_ns > w.since_ns;
+                    snprintf(line, sizeof(line), "; set or released %u times, the last %.1f s ago, %s", s.sets,
+                        nowNs > s.last_set_ns ? double(nowNs - s.last_set_ns) / 1e9 : 0.0,
+                        after ? "AFTER the wait began (missed, or another waiter took it)" : "before the wait began");
+                    out += line;
+                }
+                else
+                    out += "; never set or released";
+                if (s.resets != 0)
+                {
+                    snprintf(line, sizeof(line), "; reset %u times, the last %.1f s ago", s.resets,
+                        nowNs > s.last_reset_ns ? double(nowNs - s.last_reset_ns) / 1e9 : 0.0);
+                    out += line;
+                }
+            }
+            out += '\n';
+        }
+    }
+
+    // header: what triggered the dump ("#3 dump 1: no frame for 2.0 s ...").
+    void Dump(const char* header, double sinceReadS)
     {
         const size_t count = os::switch_cpu_profiler::CopyThreads(g_threads, MAX_THREADS);
         CaptureThreads(count);
@@ -178,11 +278,9 @@ namespace
         // Everything is running again from here on.
         std::string out;
         out.reserve(16384);
-        char line[256];
-        snprintf(line, sizeof(line), "[stall] #%d dump %d: no frame for %.1f s (%llu frames so far); module base 0x%llx; "
-            "run tools/switch-cpu-profile.py on this log to name the offsets\n",
-            episode, dump, double(armTicksToNs(now - lastFrame)) / 1e9, (unsigned long long)g_frames.load(std::memory_order_relaxed),
-            (unsigned long long)g_base);
+        char line[384];
+        snprintf(line, sizeof(line), "[stall] %s; module base 0x%llx; run tools/switch-cpu-profile.py on this log to name the "
+            "offsets\n", header, (unsigned long long)g_base);
         out += line;
 
         if (g_reporter != nullptr)
@@ -263,6 +361,9 @@ namespace
             out += '\n';
         }
 
+        if (g_waits)
+            AppendWaits(out, count, sinceReadS);
+
         os::switch_cpu_profiler::WriteLog(out);
     }
 
@@ -274,16 +375,86 @@ namespace
         uint64_t lastDump = 0;
         uint64_t stallStart = 0;
         uint64_t lastHitchReport = 0;
+        // blur-nx (2026-11-14): the quiet and on-demand triggers (switch_stall_watch.h).
+        uint64_t lastReads = rex::system::waitreg::FileReads();
+        uint64_t lastReadTick = armGetSystemTick();
+        int quietEpisode = 0;
+        int quietDumps = 0;
+        uint64_t lastQuietDump = 0;
+        int polls = 0;
+        char header[256];
 
         while (true)
         {
             svcSleepThread(POLL_NS);
 
             const uint64_t lastFrame = g_lastFrameTick.load(std::memory_order_acquire);
-            if (lastFrame == 0)
-                continue; // No frame yet (boot).
-
             const uint64_t now = armGetSystemTick();
+            const unsigned long long frames = (unsigned long long)g_frames.load(std::memory_order_relaxed);
+            const double sinceFrameS = lastFrame != 0 ? double(armTicksToNs(now - lastFrame)) / 1e9 : -1.0;
+
+            const uint64_t reads = rex::system::waitreg::FileReads();
+            if (reads != lastReads)
+            {
+                if (quietDumps != 0)
+                {
+                    char line[160];
+                    snprintf(line, sizeof(line), "[stall] quiet #%d ended: file reads resumed after %.1f s without one\n",
+                        quietEpisode, double(armTicksToNs(now - lastReadTick)) / 1e9);
+                    os::switch_cpu_profiler::WriteLog(line, strlen(line));
+                }
+                lastReads = reads;
+                lastReadTick = now;
+                quietDumps = 0;
+            }
+            const double sinceReadS = double(armTicksToNs(now - lastReadTick)) / 1e9;
+
+            // On demand: a file named stall_dump in the log folder (deleted first, so one file is one dump).
+            if (!g_triggerPath.empty() && ++polls >= TRIGGER_POLLS)
+            {
+                polls = 0;
+                struct stat st;
+                if (stat(g_triggerPath.c_str(), &st) == 0)
+                {
+                    unlink(g_triggerPath.c_str());
+                    if (lastFrame != 0)
+                        snprintf(header, sizeof(header), "on-demand dump (stall_dump): the last frame %.1f s ago (%llu frames so far)",
+                            sinceFrameS, frames);
+                    else
+                        snprintf(header, sizeof(header), "on-demand dump (stall_dump): no frame yet");
+                    Dump(header, sinceReadS);
+                    // Port 167 (from fnxf_xiii): every guest thread's guest call chain too (sdk xthread.cpp; the file
+                    // trigger only, no controller combination).
+                    static char chains[16384];
+                    const size_t len = RexGuestCallChains(chains, sizeof(chains));
+                    if (len)
+                    {
+                        const char* head = "[stall] guest call chains (r1, then each frame's saved lr):\n";
+                        os::switch_cpu_profiler::WriteLog(head, strlen(head));
+                        os::switch_cpu_profiler::WriteLog(chains, len);
+                    }
+                }
+            }
+
+            // Quiet: no file read for a while, frames or not (a frame stall dumps on its own).
+            if (g_quietTicks != 0 && !stalled && now - lastReadTick >= g_quietTicks && quietDumps < MAX_QUIET_DUMPS &&
+                (quietDumps == 0 || now - lastQuietDump >= armNsToTicks(QUIET_REDUMP_NS)))
+            {
+                if (quietDumps == 0)
+                    quietEpisode++;
+                quietDumps++;
+                if (lastFrame != 0)
+                    snprintf(header, sizeof(header), "quiet #%d dump %d: no file read for %.1f s, the last frame %.1f s ago (%llu "
+                        "frames so far)", quietEpisode, quietDumps, sinceReadS, sinceFrameS, frames);
+                else
+                    snprintf(header, sizeof(header), "quiet #%d dump %d: no file read for %.1f s, no frame yet", quietEpisode,
+                        quietDumps, sinceReadS);
+                Dump(header, sinceReadS);
+                lastQuietDump = armGetSystemTick();
+            }
+
+            if (lastFrame == 0)
+                continue; // No frame yet (boot): the frame triggers wait for the first.
 
             // Frames that took over 100 ms but not long enough for a stall: the stutters. (A stall counts too,
             // once it ends.)
@@ -313,7 +484,9 @@ namespace
 
                 if (dumps < MAX_DUMPS_PER_STALL && (dumps == 0 || now - lastDump >= armNsToTicks(REDUMP_NS)))
                 {
-                    Dump(episode, ++dumps, now, lastFrame);
+                    snprintf(header, sizeof(header), "#%d dump %d: no frame for %.1f s (%llu frames so far)", episode, ++dumps,
+                        sinceFrameS, frames);
+                    Dump(header, sinceReadS);
                     lastDump = armGetSystemTick();
                 }
             }
@@ -329,7 +502,9 @@ namespace
     }
 }
 
-void os::switch_stall_watch::Start(double seconds)
+extern "C" const char* RexSwitchLogDir(void);
+
+void os::switch_stall_watch::Start(double seconds, double quiet_seconds, bool waits)
 {
     if (g_started || seconds <= 0.0)
         return;
@@ -338,6 +513,18 @@ void os::switch_stall_watch::Start(double seconds)
     g_size = os::switch_cpu_profiler::ModuleSize();
     g_thresholdTicks = armNsToTicks(uint64_t(seconds * 1e9));
     g_hitchTicks = armNsToTicks(HITCH_NS);
+
+    // blur-nx (2026-11-14): the guest waits and the file reads are noted from here on (rex/system/wait_registry.h).
+    g_waits = waits;
+    g_quietTicks = quiet_seconds > 0.0 ? armNsToTicks(uint64_t(quiet_seconds * 1e9)) : 0;
+    rex::system::waitreg::g_on.store(waits, std::memory_order_relaxed);
+    rex::system::waitreg::g_reads_on.store(g_quietTicks != 0 || waits, std::memory_order_relaxed);
+    if (const char* dir = RexSwitchLogDir(); dir != nullptr && dir[0] != '\0')
+    {
+        g_triggerPath = dir;
+        g_triggerPath += "stall_dump";
+        unlink(g_triggerPath.c_str()); // one left from an earlier run is not a request
+    }
 
     // Above the game's threads (0x1C-0x3B), like the CPU sampler, so a busy thread cannot hide the stall; it
     // sleeps between looks.
@@ -350,6 +537,9 @@ void os::switch_stall_watch::Start(double seconds)
             g_started = true;
             os::switch_cpu_profiler::WriteLogF("Stall watchdog: thread dumps after %.1f s without a frame, frames over %llu ms counted\n",
                 seconds, (unsigned long long)(HITCH_NS / 1'000'000ull));
+            os::switch_cpu_profiler::WriteLogF("Stall watchdog: guest waits in the dumps %s; quiet dumps after %.0f s without a file "
+                "read%s; on-demand dump: a file named %s\n", waits ? "on" : "off", quiet_seconds,
+                g_quietTicks != 0 ? "" : " (off)", g_triggerPath.empty() ? "(no log folder: off)" : g_triggerPath.c_str());
         }
     }
 }

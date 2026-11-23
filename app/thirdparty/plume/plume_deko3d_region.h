@@ -16,6 +16,11 @@ struct GpuRegionRanges {
     std::map<uintptr_t, uint64_t> free;
     uint64_t used = 0, peak = 0, grown = 0, givenBack = 0;
     uint32_t growths = 0, givebacks = 0;
+    // sasrt-nx (2026-11-09 night, Deko3DSetRegionBestFit): a block goes to the smallest free range it fits (the highest
+    // of equal ones), the bottom range only when no other fits, at that range's top as before. The first fit from the
+    // top split the big ranges a freed target set left for every small buffer: run mem12 held 200-300 MB free in 40-54
+    // ranges, the largest 28-55 MB, and a 27 MB target found no room.
+    bool bestFit = true;
 
     void insert(uintptr_t at, uint64_t size) {
         auto next = free.lower_bound(at);
@@ -42,12 +47,33 @@ struct GpuRegionRanges {
         if (!size)
             return 0;
         for (int pass = 0; pass < 2; ++pass) {
-            for (auto it = free.rbegin(); it != free.rend(); ++it) {
-                if (it->second < size)
-                    continue;
-                const uintptr_t start = it->first;
-                const uint64_t left = it->second - size;
-                free.erase(std::next(it).base());
+            auto pick = free.end();
+            if (bestFit) {
+                auto bottom = free.end();
+                for (auto it = free.begin(); it != free.end(); ++it) {
+                    if (it->second < size)
+                        continue;
+                    if (it->first == low) {
+                        bottom = it;
+                        continue;
+                    }
+                    if (pick == free.end() || it->second <= pick->second)
+                        pick = it;  // ascending addresses: '<=' keeps the highest of equal sizes
+                }
+                if (pick == free.end())
+                    pick = bottom;
+            } else {
+                for (auto it = free.rbegin(); it != free.rend(); ++it) {
+                    if (it->second >= size) {
+                        pick = std::next(it).base();
+                        break;
+                    }
+                }
+            }
+            if (pick != free.end()) {
+                const uintptr_t start = pick->first;
+                const uint64_t left = pick->second - size;
+                free.erase(pick);
                 if (left)
                     free.emplace(start, left);
                 used += size;
@@ -96,6 +122,29 @@ struct GpuRegionRanges {
         low = newLow;
         givenBack += give;
         ++givebacks;
+    }
+
+    // sasrt-nx (2026-11-09, Deko3DRegionGiveBack): the free range at the bottom back to newlib now, whatever its size
+    // (in whole 'step's), if raise(new low) allows it; the bytes given.
+    template <typename Raise>
+    uint64_t giveBackBottom(uint64_t step, Raise &&raise) {
+        auto it = free.find(low);
+        if (it == free.end())
+            return 0;
+        const uint64_t give = it->second / step * step;
+        if (!give)
+            return 0;
+        const uintptr_t newLow = low + give;
+        if (!raise(newLow))
+            return 0;
+        const uint64_t rest = it->second - give;
+        free.erase(it);
+        if (rest)
+            free.emplace(newLow, rest);
+        low = newLow;
+        givenBack += give;
+        ++givebacks;
+        return give;
     }
 
     uint64_t freeBytes() const {

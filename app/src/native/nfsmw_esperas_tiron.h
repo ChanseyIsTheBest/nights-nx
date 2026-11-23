@@ -14,17 +14,17 @@
 namespace nfsmw::esperas {
 
 enum Tipo : uint32_t {
-  kRelevoEjecutor,    // Main XThread waiting for the preparer to hand over the frame (sub_8262D988)
-  kRelevoPreparador,  // the preparer waiting for the executor to finish the previous one (sub_8262D988)
-  kSitioAnillo,       // the D3D waiting for the ring to advance (sub_825A5D18)
+  kRelevoEjecutor,    // Main XThread waiting for the preparer to hand over the frame (sub_826165CC)
+  kRelevoPreparador,  // the preparer waiting for the executor to finish the previous one (sub_826165CC)
+  kSitioAnillo,       // the D3D waiting for the ring to advance (sub_8258B040)
   kJuegoMedio,        // the game inside sub_826E8EE8
   kAnilloSinTrabajo,  // the ring thread with no packets to read
   kAnilloRegMem,      // the ring thread in a WAIT_REG_MEM (waiting for the game to write)
   // The game's side in the stutter frame ("[tiron] juego" line).
-  kEjecutorSinOrdenes,   // Main XThread with the list open and no new commands (sub_823C83F8)
-  kPreparadorLista,      // the preparer filling the command list (all of sub_82445660: culling and eView)
+  kEjecutorSinOrdenes,   // Main XThread with the list open and no new commands (sub_82395184)
+  kPreparadorLista,      // the preparer filling the command list (all of sub_824216B4: culling and eView)
   kPreparadorFuera,      // the preparer between two fills: its simulation plus its handoff wait
-  kPreparadorEscenario,  // TreeCull (sub_824C2F48) with its DrawAScenery calls, inside the fill
+  kPreparadorEscenario,  // TreeCull (sub_824A0D04) with its DrawAScenery calls, inside the fill
   kNumTipos
 };
 

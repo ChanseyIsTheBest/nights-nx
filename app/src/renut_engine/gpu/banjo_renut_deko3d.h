@@ -42,4 +42,8 @@ void SaveShaderCache();
 // One line for the renderer's report: compiles, cache hits, memory.
 std::string Report();
 
+// sasrt-nx (2026-11-08, sasrt_deko3d_diag_trace; the second GPU round): at each scan-out; with the key, every 600th
+// frame's command stream is recorded (plume::Deko3DTraceToken) and logged at the next scan-out.
+void TraceFrameBoundary();
+
 }  // namespace banjo::renut_gpu::deko3d

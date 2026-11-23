@@ -276,6 +276,18 @@ REXCVAR_DEFINE_BOOL(masseffect_native_pm4_fast, false, "Mass Effect",
                     "straight from the guest words; same register contents and generation bumps")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DECLARE(bool, banjo_cpu_verify);  // src/cpu/banjo_enhancements.cpp
+// Port 172 (from fnxf_xiii): see VblankLoop (and the SDK's GraphicsSystem vsync worker). Off by default: every title's vblank timing changes.
+REXCVAR_DEFINE_BOOL(banjo_vblank_from_display, false, "GPU",
+                    "The guest's vblanks follow the display's refreshes (its vsync event), the 60 Hz timer only while "
+                    "none comes for 1.5 periods: on the timer the guest's vblank drifted against the display, and 30 fps "
+                    "frames came out uneven (fnxf_xiii). Needs a title that follows the display (banjo_display_sync). "
+                    "false: the timer, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+namespace rex::graphics {
+// Port 172: the display's refresh count, waited for (set by app/src/renut_engine/display_sync.cpp; read here and by
+// sdk/src/graphics/graphics_system.cpp). Defined here: this object is in every build.
+uint64_t (*g_display_refresh_wait)(uint64_t seen, uint64_t timeout_ns) = nullptr;
+}
 REXCVAR_DECLARE(bool, masseffect_native_deferred_recording);  // masseffect_native_deferred.cpp
 REXCVAR_DECLARE(bool, banjo_d3d_api_clear);  // src/me/banjo_d3d_clear.h
 REXCVAR_DECLARE(bool, banjo_d3d_api_resolve);  // src/me/banjo_d3d_clear.h
@@ -594,7 +606,7 @@ struct DrawRecord {
 // out; the window search drops the ones skipped when a later one matches.
 
 // Index/vertex count the ring carries for `prims` primitives of a Xenos primitive type
-// (sub_82228568 takes a primitive count and multiplies it, mullw at +175).
+// (sub_821F7618 takes a primitive count and multiplies it, mullw at +175).
 uint32_t CountForPrimitives(uint32_t type, uint32_t prims) {
   switch (type) {
     case 1: return prims;             // point list
@@ -960,7 +972,7 @@ std::atomic<uint64_t> g_native_records{0}, g_native_fallbacks{0}, g_native_check
 
 }  // namespace direct
 
-// banjo_d3d_host_submit (step 6 of docs/d3d-full-replacement.md): Direct3D's kick (sub_82210408) writes one indirect
+// banjo_d3d_host_submit (step 6 of docs/d3d-full-replacement.md): Direct3D's kick (sub_821DF948) writes one indirect
 // buffer packet per segment into the primary ring and then the ring's write pointer. Its hook (KickBegin) works out
 // those packets from the kick's arguments and the device's ring fields (+10952 the write position, +14900 the mask,
 // in words) before the original runs; WriteMmio, when the write pointer the kick stores is the one predicted, puts them
@@ -969,7 +981,7 @@ std::atomic<uint64_t> g_native_records{0}, g_native_fallbacks{0}, g_native_check
 // is parsed as before. Single producer at a time (a kick: Direct3D's device is used by one thread at a time), single
 // consumer (the decoder, or the ring thread).
 //
-// Direct3D also copies packets of its own into the primary ring between kicks (sub_826571D8: the tile select of the
+// Direct3D also copies packets of its own into the primary ring between kicks (sub_8263FD60: the tile select of the
 // next segment, 2-3 a frame), which the next kick's write pointer submits. Their hook queues them as record operations
 // (decoded there, by value: the ring's words are final once written), applied where they are in the ring.
 namespace submit {
@@ -1216,7 +1228,7 @@ const masseffect::native::ShaderEntry* ByCode(const std::vector<uint32_t>& micro
   return entry;
 }
 std::atomic<const masseffect::native::ShadersNative*> g_library{nullptr};
-// Vertex shaders seen only after Direct3D patched their microcode (sub_8222F1C8) are found by the
+// Vertex shaders seen only after Direct3D patched their microcode (sub_821FE318) are found by the
 // virtual part of their container (header, constant table, vertex elements); hashes shared by more
 // than one library entry are left out.
 std::unordered_map<uint64_t, const masseffect::native::ShaderEntry*> g_vs_by_virtual;
@@ -1760,7 +1772,30 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
     const auto interval =
         std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / hz));
     auto next = Clock::now() + interval;
+    // Port 172 (from fnxf_xiii, its notes of 2026-10-27 and 10-29; banjo_vblank_from_display): a vblank at each of the
+    // display's refreshes (its vsync event, counted by app/src/renut_engine/display_sync.cpp); the timer's only while
+    // none comes for 1.5 periods (the display asleep). On the timer the guest's vblank drifted against the display and
+    // 30 fps frames came out uneven (fnxf_xiii). Looked for at every tick: the display's thread may start later.
+    static const bool follow_display = REXCVAR_GET(banjo_vblank_from_display);
     while (active_.load(std::memory_order_acquire)) {
+      if (follow_display && rex::graphics::g_display_refresh_wait) {
+        const uint64_t period_ns = uint64_t(1e9 / hz);
+        uint64_t seen = rex::graphics::g_display_refresh_wait(UINT64_MAX, 0);
+        auto last = Clock::now();
+        while (active_.load(std::memory_order_acquire)) {
+          const uint64_t count = rex::graphics::g_display_refresh_wait(seen, period_ns * 3 / 2);
+          const auto now = Clock::now();
+          if (count == seen && now - last < interval)
+            continue;
+          seen = count;
+          last = now;
+          counter_.fetch_add(1, std::memory_order_relaxed);
+          Interrupt(0, 2);
+          WakeRingWait();  // banjo_ring_wait_vblank: the interrupt handler has run
+          REX_SYS_COUNT(rex::syscount::kVblankTick, 1);
+        }
+        return 0;
+      }
       const auto now = Clock::now();
       if (now - next > std::chrono::milliseconds(250)) next = now;
       while (now >= next) {
@@ -2586,7 +2621,7 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
         }
         WriteMemory(address, ((initiator >> 31) & 0x1) ? counter_.load(std::memory_order_relaxed)
                                                        : value);
-        // The D3D fence word the game's wait loop compares (sub_8222C768 / sub_8222FA98): wake it now, not
+        // The D3D fence word the game's wait loop compares (sub_821FB848 / sub_821FEBE0): wake it now, not
         // at the end of the ring segment.
         NotifyRingProgress();
         break;
@@ -6726,7 +6761,7 @@ void KickEnd() {
   if (submit::t_pending) submit::t_pending->on = false;
 }
 
-// sub_826571D8 (r3 the device, r4 the words, r5 how many), before the original: its words as operations, queued at
+// sub_8263FD60 (r3 the device, r4 the words, r5 how many), before the original: its words as operations, queued at
 // the ring position they will have (the next kick's write pointer submits them; the decoder does not reach them
 // before). Words that are not whole packets of the record's kinds stay in the ring to be parsed.
 void RingWords(const uint8_t* base, uint32_t device, uint32_t words, uint32_t count) {

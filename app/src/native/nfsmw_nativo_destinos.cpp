@@ -228,10 +228,10 @@ REXCVAR_DEFINE_BOOL(nfsmw_nativo_restaurar_area_util, true, "NFSMW",
 /*
  * Off. This is what left the car without a shadow (bridges, trees).
  *
- * The race shadow pass resolves the same render target twice (sub_82443B18):
- *   1. after the world, without a clear  -> texture[1] ([0x82A15374], 07CEA000)   sub_824427F8
- *   2. after the cars, with a clear      -> texture[0] ([0x82A15370], 086AE000)   sub_82442908
- * The car body (effect type 7, sub_824511E8) samples 1 (the map without cars, so as not to shadow itself)
+ * The race shadow pass resolves the same render target twice (sub_8241FC98):
+ *   1. after the world, without a clear  -> texture[1] ([0x82A71998], 07CEA000)   sub_8241E90C
+ *   2. after the cars, with a clear      -> texture[0] ([0x82A71994], 086AE000)   sub_8241E9F8
+ * The car body (effect type 7, sub_8242D0C8) samples 1 (the map without cars, so as not to shadow itself)
  * and the world samples 0. Between the two resolves the game draws the cars on top without clearing, so
  * here the render target was restored by swapping: texture[1] got its old image back and stayed lent out
  * until the next frame's resolve. The scene reads it before that: in a console run, the increase of
@@ -317,7 +317,7 @@ REXCVAR_DEFINE_BOOL(nfsmw_nativo_frontal_perezoso, true, "NFSMW",
 /*
  * The shadow map without the 1600x1600 copy (nfsmw_nativo_sombra_minimo).
  *
- * The race shadow pass (sub_82443B18) draws the world into the 1600x1600 render target, resolves it without
+ * The race shadow pass (sub_8241FC98) draws the world into the 1600x1600 render target, resolves it without
  * a clear to texture[1] (07CEA000: the map without cars, sampled by the car body), draws the cars on top and
  * resolves it with a clear to texture[0] (086AE000: the map with cars, sampled by the world). Since we
  * resolve by swapping images, after the first resolve the render target no longer holds the world and it
@@ -469,8 +469,8 @@ REXCVAR_DEFINE_INT32(nfsmw_nativo_diag_lectores_s, 0, "NFSMW",
 /*
  * The composited scene is only copied if someone reads it (nfsmw_nativo_compuesta_perezosa).
  * The scene texture (098B0000 at 1024x576) is written twice per frame: the blit of the scene and, after the
- * composition, the composited scene 1 to 1 from the output (sub_82442478: VT, resolve and drops). The
- * second one is only read by the raindrops on the screen (sub_82448168, PS n145), which come right after and
+ * composition, the composited scene 1 to 1 from the output (sub_8241E550: VT, resolve and drops). The
+ * second one is only read by the raindrops on the screen (sub_82424180, PS n145), which come right after and
  * before the HUD. It is deferred: it is recorded right before the first draw that samples it without its
  * source having been written again (exact), dropped if another write covers it entirely (exact) and dropped
  * when its source (the HUD) is written if nobody has read it: 0.59 Mpixels and ~0.35 ms real of GPU per

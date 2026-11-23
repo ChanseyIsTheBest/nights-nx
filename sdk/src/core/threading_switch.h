@@ -210,10 +210,17 @@ unsigned RexSwitchAppCoreMask(void);
 /* Pins the calling thread to the system core alone and, if priority >= 0, sets its priority. False (nothing
  * changed) without a system core. */
 bool RexSwitchMoveCurrentThreadToSystemCore(int priority);
+// banjo-nx (2026-11-22): the calling thread's cores set to 'mask' (bits of cores) with 'preferred' its ideal one, the
+// system core kept in it (svcSetThreadCoreMask's wrap takes the system core out of a mask of several cores); the
+// process's cores only. False when nothing of the mask is the process's or the call fails.
+bool RexSwitchSetCurrentThreadCoresWithSystem(int preferred, unsigned mask);
 /* banjo-nx (2026-10-27): running under the forwarder banjo_forwarder_program_id names, writes the four-core NPDM to
  * sdmc:/atmosphere/contents/<id>/exefs/main.npdm when it is missing or different (Atmosphere's ExeFS file replacement;
- * it takes effect at the forwarder's next launch). 0 nothing to do, 1 already in place, 2 written, -1 failed. */
+ * it takes effect at the forwarder's next launch). 0 nothing to do, 1 already in place, 2 written, -1 failed.
+ * blur-nx (2026-11-18): with four_core_mode false it removes that NPDM instead (3 removed, 0 none of ours there). */
 int RexSwitchEnsureForwarderNpdm(void);
+/* blur-nx (2026-11-18): the same for the game menu's four-core option (on: written, off: removed), at once. */
+int RexSwitchApplyFourCoreMode(int on);
 /* banjo-nx (2026-10-27): banjo_system_core_xma (the XMA Decoder on the system core) and the mixer's priority there. */
 bool RexSwitchSystemCoreXma(void);
 int RexSwitchSystemCoreMixerPriority(void);
@@ -236,6 +243,25 @@ bool RexSwitchCoreIdleSample(int core, unsigned long long* idle_ticks, unsigned 
  * and walks the heap (mallinfo).
  */
 void RexSwitchDescribeThreadFailure(size_t stack_size, char* out, size_t out_len);
+
+/* sasrt-nx (2026-11-09; port 58, for a title's memory governor): the guest thread stacks kept for the next threads
+ * (the pool, switch_thread_stack_pool) back to the heap now; the bytes given. A thread made later takes a new block. */
+size_t RexSwitchReleaseSpareStacks(void);
+/* sasrt-nx (2026-11-09 night; port 58): the pooled-size (guest) stacks in use, and the kept ones with their bytes. */
+void RexSwitchStackFigures(size_t* live, size_t* kept, size_t* kept_bytes);
+/* sasrt-nx (2026-11-09 night; port 58): pooled-size stacks taken so far (new and reused): a count that stops moving
+ * when no guest thread is being made (a governor can give the kept stacks back after a minute of that). */
+uint64_t RexSwitchStacksTaken(void);
+/* sasrt-nx (2026-11-10; port 65, thread_event_address_wait): an event's blocked threads sleep on a 32-bit word.
+ * WaitIfEqual: svcWaitForAddress (wait while *word == value, at most ns; false when it timed out);
+ * WakeAddress: svcSignalToAddress (wake up to count threads waiting on word). */
+bool RexSwitchWaitIfEqual(volatile uint32_t* word, uint32_t value, int64_t ns);
+void RexSwitchWakeAddress(volatile uint32_t* word, int32_t count);
+/* blur-nx (2026-11-12, CPU batch 3): switch_thread_priorities. Gives the thread 'handle' the priority of the first
+ * table entry whose prefix starts 'name'; returns that priority, or -1 (no entry, or the call failed). */
+int RexSwitchApplyNamedPriority(unsigned handle, const char* name);
+/* How many threads switch_thread_priorities has set (for the log). */
+unsigned RexSwitchNamedPrioritiesApplied(void);
 
 #ifdef __cplusplus
 }

@@ -270,7 +270,8 @@ Each variant is the base config with a few keys changed, so two logs compare dir
   banjo_hot_guard_on.toml          2026-10-22: the native copies' guard back on (64 first calls per thread, then 1 in
                                    4096); renut.toml calls every copy directly
 
-To use one on the console, copy it over sdmc:/switch/banjo-nx/renut.toml.
+To use one on the console, copy it over the toml the NRO reads (katamari.toml next to it; renut.toml with
+KATAMARI_BUILTIN_CONFIG off).
 
 Usage: python tools/make_enhancement_configs.py <base renut.toml> <output folder>
 """

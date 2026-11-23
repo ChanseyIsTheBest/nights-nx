@@ -113,7 +113,10 @@ function(rex_resolve_version out_var)
         set(ARG_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
     endif()
 
-    find_program(GIT_EXECUTABLE git)
+    # kameo-nx (2026-11-05): the v* tags of this repository are the game's releases, not the SDK's. Read as SDK versions
+    # they stop the configure ("floor version (0.10) is behind tag version (1.0)"), in any clone that has fetched them.
+    # So the SDK's version always comes from its floor, the same string as in a checkout with no tags.
+    set(GIT_EXECUTABLE "")
     if(NOT GIT_EXECUTABLE)
         rex_compute_version(result
             FLOOR_MAJOR ${ARG_FLOOR_MAJOR}

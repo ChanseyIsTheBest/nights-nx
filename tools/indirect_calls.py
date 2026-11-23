@@ -39,6 +39,26 @@ import re
 import sys
 
 FUNC = re.compile(r'^DEFINE_REX_FUNC\((sub_([0-9A-F]{8}))\) \{$')
+# banjo-nx (2026-11-19, the rebase on the ultimate base; handed to the base): every function, named ones too
+# (a config's names: appMainDraw, rex_XInputGetKeystroke ...), by its address in *_init.cpp's table. Before, a named
+# function's sites counted as the previous sub_ function's, so a list keyed that way moved to other sites whenever the
+# generator laid the files out differently (banjo-nx on the base: 19 of 298 sites not found).
+ANY_FUNC = re.compile(r'^DEFINE_REX_FUNC\((\w+)\) \{$')
+INIT_ENTRY = re.compile(r'^\s*\{ 0x([0-9A-F]{8}), (\w+) \},\s*$')
+
+
+def function_addresses(gen):
+    """name -> address (8 hex digits) of every function in the generated tree's *_init.cpp table."""
+    names = {}
+    for f in os.listdir(gen):
+        if f.endswith('_init.cpp'):
+            for line in open(os.path.join(gen, f), encoding='utf-8'):
+                m = INIT_ENTRY.match(line)
+                if m:
+                    names.setdefault(m.group(2), m.group(1))
+    return names
+
+
 PLAIN = re.compile(r'^\tREX_CALL_INDIRECT_FUNC\(((?:ctx\.)?ctr\.u32)\);$')
 SITE = re.compile(r'^\tREX_CALL_INDIRECT_FUNC_AT\(0x[0-9A-F]{8}, \d+, ((?:ctx\.)?ctr\.u32)\);$')
 PROMOTED = re.compile(r'^\tif \(REX_PROMOTED_IS\(((?:ctx\.)?ctr\.u32), 0x[0-9A-F]{8}u\)\) \[\[likely\]\] \{ '
@@ -53,7 +73,49 @@ MACROS = MARKER + '''
 #endif
 #endif
 #ifndef REX_CALL_INDIRECT_FUNC_AT
-#if defined(__SWITCH__) || defined(REX_INDIRECT_CENSUS_OFF)
+#if defined(__SWITCH__) && !defined(REX_SITE_CACHE_OFF)
+// blur-nx (2026-11-17, CG-08 of docs/codegen-ideas-3.md): a one-entry cache per site. The dispatch table is 2 bytes per
+// guest code byte (20 MB for Blur), so a virtual call's table load usually misses (0.4-0.5 % of all console samples,
+// 1.6-3.3 % of the audio worker's). The site keeps its first target and function in one 64-bit word (~target in the
+// high half, and an empty word never taken for target 0xFFFFFFFF; the function as a 32-bit offset from RexSiteAnchor),
+// read and written whole, so it is never torn. An empty word is filled by RexSiteMiss (out of line, once per site); a
+// full word for another target takes the plain lookup inline, as without the cache (batch 1's version replaced full
+// words on 1 miss in 16 from an out-of-line miss path: its polymorphic sites paid a call and a counter read at every
+// miss, ~0.5 % of the frame jobs' samples). Memory::SetFunction clears every word after a table write
+// (sdk/src/system/xmemory.cpp: the section rex_site_cache, only when a word was filled since). The table path and the
+// result are the table's: exact. REX_SITE_CACHE_OFF: the plain lookup.
+extern "C" unsigned char g_rex_site_cache_dirty;
+[[gnu::noinline, gnu::used]] inline void RexSiteAnchor(PPCContext&, uint8_t*) {}
+[[gnu::noinline]] inline void RexSiteMiss(uint64_t* slot, uint32_t t, PPCContext& ctx, uint8_t* base) {
+  PPCFunc* f = nullptr;
+  if ((uint32_t)(t - REX_CODE_BASE) < REX_CODE_SIZE + REX_THUNK_RESERVE_SIZE) [[likely]] f = REX_LOOKUP_FUNC(base, t);
+  if (f) [[likely]] {
+    const intptr_t off = (intptr_t)f - (intptr_t)&RexSiteAnchor;
+    if (off == (intptr_t)(int32_t)off && t != 0xFFFFFFFFu) {
+      __atomic_store_n(slot, (uint64_t(~t) << 32) | uint32_t(int32_t(off)), __ATOMIC_RELAXED);
+      if (!__atomic_load_n(&g_rex_site_cache_dirty, __ATOMIC_RELAXED))
+        __atomic_store_n(&g_rex_site_cache_dirty, 1, __ATOMIC_RELAXED);
+    }
+  } else {
+    ctx.last_indirect_target = t;
+    f = rex::runtime::ResolveIndirectFunction(t);
+  }
+  f(ctx, base);
+}
+#define REX_CALL_INDIRECT_FUNC_AT(function, site, x)                                                    \\
+  do {                                                                                                  \\
+    static uint64_t rex_site_cache_ __attribute__((section("rex_site_cache")));                         \\
+    const uint32_t rex_site_t_ = (uint32_t)(x);                                                         \\
+    const uint64_t rex_site_c_ = __atomic_load_n(&rex_site_cache_, __ATOMIC_RELAXED);                   \\
+    if ((uint32_t)(rex_site_c_ >> 32) == ~rex_site_t_ && rex_site_c_ != 0) [[likely]]                  \\
+      ((PPCFunc*)((intptr_t)&RexSiteAnchor + (intptr_t)(int32_t)(uint32_t)rex_site_c_))(ctx, base);     \\
+    else if (rex_site_c_ != 0)                                                                          \\
+      REX_CALL_INDIRECT_FUNC(rex_site_t_);                                                              \\
+    else                                                                                                \\
+      RexSiteMiss(&rex_site_cache_, rex_site_t_, ctx, base);                                            \\
+  } while (0)
+#define REX_PROMOTED_CALL(target, function) ((void)0)
+#elif defined(__SWITCH__) || defined(REX_INDIRECT_CENSUS_OFF)
 #define REX_CALL_INDIRECT_FUNC_AT(function, site, x) REX_CALL_INDIRECT_FUNC(x)
 #define REX_PROMOTED_CALL(target, function) ((void)0)
 #else
@@ -96,6 +158,7 @@ def main():
                 promote[(line[0].upper(), int(line[1]))] = [t.upper() for t in line[2:5]]
     texts = {}
     defined = set()
+    addresses = function_addresses(a.gen)
     for f in files:
         texts[f] = open(os.path.join(a.gen, f), encoding='utf-8').read().split('\n')
         for line in texts[f]:
@@ -111,9 +174,11 @@ def main():
         ordinal = 0
         targets = set()
         for i, line in enumerate(lines):
-            m = FUNC.match(line)
+            m = ANY_FUNC.match(line)
             if m:
-                function, ordinal = m.group(2), 0
+                name = m.group(1)
+                function = name[4:] if FUNC.match(line) else addresses.get(name)
+                ordinal = 0
                 continue
             if function is None or not (line.startswith('\tREX_CALL_INDIRECT_') or line.startswith('\tif (REX_PROMOTED_IS(')):
                 continue
@@ -178,6 +243,16 @@ def main():
                      'changed' % pch)
         if not a.check:
             open(pch, 'w', encoding='utf-8', newline='\n').write(text.replace(anchor, MACROS + '\n' + anchor, 1))
+    elif MACROS not in text:
+        # renut-ultimate (2026-11-17, port 150): an older form of the block (before CG-08's site caches, say) is put in
+        # place of, as loop_locals.py does with its own: a game's tree gets the current macros without a new codegen.
+        # The block ends with REX_CALL_INDIRECT_FUNC_AT's two #endif lines, every form of it so far.
+        start = text.index(MARKER)
+        tail = '#endif\n#endif\n'
+        end = text.index(tail, text.index('#ifndef REX_CALL_INDIRECT_FUNC_AT', start)) + len(tail)
+        if not a.check:
+            open(pch, 'w', encoding='utf-8', newline='\n').write(text[:start] + MACROS + text[end:])
+        print('indirect_calls: the macros in %s were replaced by the current ones' % pch)
     print('indirect_calls%s: %d bctrl sites written (%d promoted to a guarded direct call, %d of them with two or '
           'three targets; %d in the list), %d already as wanted; %d files changed' %
           (' (check only)' if a.check else '', tagged, promoted, chained, len(promote), already, changed))

@@ -66,6 +66,7 @@ u32 BoundDeclType(u32 type);
 // little-endian host format reads a word.
 enum class ElementConversion : u8 {
   Copy32,       // each word endian-swapped and stored little-endian
+  Copy32Finite, // vivapinata-nx: a single 32-bit float, as Copy32 with infinities and NaNs made the largest finite value
   ExpandFloat,  // decoded (and swizzled) to four 32-bit floats on the CPU
 };
 

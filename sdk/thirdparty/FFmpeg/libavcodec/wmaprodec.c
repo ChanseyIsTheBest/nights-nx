@@ -315,9 +315,52 @@ static av_cold int get_rate(AVCodecContext *avctx)
  *@param avctx codec context
  *@return 0 on success, -1 otherwise
  */
+/* blur-nx (2026-11-13, M-06 of docs/cpu-moonshots-50-1113.md): the band quantiser 10^(exp / 20) of decode_subframe
+ * from a table for the integer exps in [WMAPRO_QUANT_MIN, WMAPRO_QUANT_MAX] (the formula outside it). Per band, per
+ * channel, per subframe it cost two double divides, a floor and fastexp2's polynomial (0.5-0.7 ms a frame in Blur's
+ * race). Exact: the table holds the same expression's floats (FFmpeg is built with -ffp-contract=off and no fast
+ * math: plain IEEE doubles, the same bits wherever the expression is compiled), and init_static_vlcs checks every
+ * entry against the expression as decode_subframe wrote it; one difference turns the table off (the formula then). */
+#define WMAPRO_QUANT_MIN (-1024)
+#define WMAPRO_QUANT_MAX 1023
+static float wmapro_quant_table[WMAPRO_QUANT_MAX - WMAPRO_QUANT_MIN + 1];
+static int wmapro_quant_table_ok;
+
+static av_noinline float wmapro_quant_formula(int exp)
+{
+    return ff_exp10(exp / 20.0);
+}
+
+static av_always_inline float wmapro_quant(int exp)
+{
+    if (exp >= WMAPRO_QUANT_MIN && exp <= WMAPRO_QUANT_MAX && wmapro_quant_table_ok)
+        return wmapro_quant_table[exp - WMAPRO_QUANT_MIN];
+    return wmapro_quant_formula(exp);
+}
+
+static av_cold void init_quant_table(void)
+{
+    int i, ok = 1;
+    for (i = WMAPRO_QUANT_MIN; i <= WMAPRO_QUANT_MAX; i++)
+        wmapro_quant_table[i - WMAPRO_QUANT_MIN] = wmapro_quant_formula(i);
+    /* the self-check: the expression inline, as decode_subframe had it */
+    for (i = WMAPRO_QUANT_MIN; i <= WMAPRO_QUANT_MAX; i++) {
+        const float inline_quant = ff_exp10(i / 20.0);
+        const float table_quant = wmapro_quant_table[i - WMAPRO_QUANT_MIN];
+        if (memcmp(&inline_quant, &table_quant, sizeof(float)) != 0) {
+            ok = 0;
+            av_log(NULL, AV_LOG_ERROR, "wmapro: quantiser table entry %d differs from the formula: table off\n", i);
+            break;
+        }
+    }
+    wmapro_quant_table_ok = ok;
+}
+
 static AVOnce init_static_once = AV_ONCE_INIT;
 static av_cold void init_static_vlcs(void)
 {
+    init_quant_table();  /* blur-nx (2026-11-13, M-06) */
+
     INIT_VLC_STATIC(&sf_vlc, SCALEVLCBITS, HUFF_SCALE_SIZE,
                     scale_huffbits, 1, 1,
                     scale_huffcodes, 2, 2, 616);
@@ -1403,7 +1446,7 @@ static int decode_subframe(WMAProDecodeCtx *s)
                 const int exp = s->channel[c].quant_step -
                             (s->channel[c].max_scale_factor - *sf++) *
                             s->channel[c].scale_factor_step;
-                const float quant = ff_exp10(exp / 20.0);
+                const float quant = wmapro_quant(exp);  /* blur-nx (2026-11-13, M-06): a table, the same bits */
                 int start = s->cur_sfb_offsets[b];
                 s->fdsp->vector_fmul_scalar(s->tmp + start,
                                            s->channel[c].coeffs + start,

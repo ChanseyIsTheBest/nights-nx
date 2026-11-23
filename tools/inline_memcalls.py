@@ -71,11 +71,19 @@ template <uint32_t N>
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--gen', required=True)
+    # renut-ultimate (2026-11-20, port 200; deadpool-nx's 8c90b5ca): each takes a comma-separated list (a game with two
+    # memsets: deadpool-nx's 82F88DF0,82D71E58). nights-nx: the defaults are NiGHTS's C runtime memcpy / memset
+    # (tools/crt_signatures.py: the same instructions as N&B's sub_82BB4510 / sub_82BB4A40; the base's defaults were
+    # N&B's title update 3's 82C111C0 / 82C116F0), as post_codegen.py calls this with none.
     ap.add_argument('--memcpy', default='824FBC50')
     ap.add_argument('--memset', default='824FBB50')
     ap.add_argument('--check', action='store_true')
     a = ap.parse_args()
-    call = re.compile(r'^(\t+)((?:__imp__)?sub_(%s|%s)\(ctx, base\));$' % (a.memcpy.upper(), a.memset.upper()))
+    mc = {x.strip().upper() for x in a.memcpy.split(',') if x.strip()}
+    ms = {x.strip().upper() for x in a.memset.split(',') if x.strip()}
+    # port 200 (deadpool-nx's): a call followed on its line by an r1 macro (REX_R1_...();, from the r1 passes) is
+    # taken too, the macro kept after the inline form.
+    call = re.compile(r'^(\t+)((?:__imp__)?sub_(%s)\(ctx, base\));(\s*REX_R1_\w+\(\);)?$' % '|'.join(sorted(mc | ms)))
     counts = collections.Counter()
     sizes = collections.Counter()
     changed = 0
@@ -93,10 +101,11 @@ def main():
                 continue
             c = call.match(line)
             if c:
-                which = 'memcpy' if c.group(3) == a.memcpy.upper() else 'memset'
+                which = 'memcpy' if c.group(3) in mc else 'memset'
                 counts[which + ' calls'] += 1
                 if known is not None and 1 <= known <= 64:
-                    lines[i] = '%sREX_%s_CONST(%d, %s);' % (c.group(1), which.upper(), known, c.group(2))
+                    lines[i] = '%sREX_%s_CONST(%d, %s);%s' % (c.group(1), which.upper(), known, c.group(2),
+                                                             c.group(4) or '')
                     counts[which] += 1
                     sizes[(which, known)] += 1
                 known = None

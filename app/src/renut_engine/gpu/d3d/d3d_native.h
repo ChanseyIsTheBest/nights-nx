@@ -406,4 +406,12 @@ void Resolve(Device device, u32 flags, u32 dest_texture, float clear_z, u32 clea
 void BeginExport(Device device, u32 index, u32 resource, u32 flags);
 void EndExport(Device device, u32 index, u32 resource, u32 flags);
 
+// blur-nx (2026-11-10/11, port 76; its key 213: blur_renut_occlusion_queries; d3d/hooks/state.cpp): an issued occlusion
+// query's sample blocks answered as the reference's GPU answers them (1000 samples passed), before the game's
+// D3DQuery_GetData reads them; false when the key is off or the query is not an issued occlusion query. A game wires it
+// with RENUT_D3DQUERY_GETDATA_HOOK(sub_<its GetData>) in d3d/hooks/state.cpp's hook list. QueryBlockPhysical: a block's
+// physical address as GetData forms it from a pointer of the query.
+u32 QueryBlockPhysical(u32 pointer);
+bool AnswerOcclusionQuery(u32 query);
+
 }  // namespace renut::gpu::native

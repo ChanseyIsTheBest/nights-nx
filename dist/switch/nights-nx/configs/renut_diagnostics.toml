@@ -462,8 +462,8 @@ license_mask = 1
 headless = true
 nights_renut_swap_pacing = true
 nights_renut_smaa_before_ps = "82E6A43836DB5864"
-nights_renut_double_buffer = true
-nights_renut_queue_drain = true
+pacman_renut_double_buffer = true
+pacman_renut_queue_drain = true
 [input_p1]
 
 [input_p2]

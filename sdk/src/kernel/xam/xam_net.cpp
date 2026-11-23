@@ -45,6 +45,8 @@
 #include <sys/socket.h>
 #endif
 
+REXCVAR_DECLARE(bool, net_offline_sockets);  // system/xsocket.cpp (port 55)
+
 namespace rex {
 namespace kernel {
 namespace xam {
@@ -587,7 +589,8 @@ REXCVAR_DEFINE_BOOL(guest_network, false, "Kernel",
                     "cable unplugged");
 
 u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
-  if (!REXCVAR_GET(guest_network)) {
+  // port 55: net_offline_sockets gives the game sockets without a host socket (XSocket::Initialize) instead.
+  if (!REXCVAR_GET(guest_network) && !REXCVAR_GET(net_offline_sockets)) {
     XThread::SetLastError(0x2742);  // WSAENETDOWN
     return uint32_t(-1);
   }
@@ -895,6 +898,11 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
   }
 
   if (ret == -1) {
+    if (socket->offline()) {
+      // peggle2-nx: an offline socket names its own error (WSAEWOULDBLOCK, or WSAEINTR when it was closed).
+      XThread::SetLastError(socket->last_error());
+      return ret;
+    }
 // TODO: Better way of getting the error code
 #if REX_PLATFORM_WIN32
     uint32_t error_code = WSAGetLastError();

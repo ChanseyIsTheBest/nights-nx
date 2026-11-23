@@ -112,7 +112,9 @@ if(PLUME_D3D12_AGILITY_SDK_ENABLED)
 endif()
 
 if(PLUME_PLATFORM_SWITCH)
-    if(NOT EXISTS "${PLUME_SWITCH_NVK_LIBRARY}")
+    # renut-ultimate (2026-11-20, port 194; TFU-nx's): the driver must exist only when it is linked (PLUME_SWITCH_NVK_LINK,
+    # set by the parent before this file: banjo_renut_gpu.cmake); the deko3d-only build has none.
+    if((NOT DEFINED PLUME_SWITCH_NVK_LINK OR PLUME_SWITCH_NVK_LINK) AND NOT EXISTS "${PLUME_SWITCH_NVK_LIBRARY}")
         message(FATAL_ERROR "PLUME_SWITCH_NVK_LIBRARY does not exist: ${PLUME_SWITCH_NVK_LIBRARY}")
     endif()
     target_compile_definitions(plume PUBLIC
@@ -171,7 +173,12 @@ if(PLUME_PLATFORM_SWITCH)
         "-Wl,--end-group"
     )
     else()
-        target_link_libraries(plume PUBLIC zstd z nx)
+        # Port 194 (TFU-nx's): libzstd only when the switch-zstd portlib is installed (Renut decompresses with its own
+        # copy, renut_zstd; nothing else needs it without the NVK driver).
+        if(EXISTS "${PLUME_SWITCH_PORTLIBS_ROOT}/portlibs/switch/lib/libzstd.a")
+            target_link_libraries(plume PUBLIC zstd)
+        endif()
+        target_link_libraries(plume PUBLIC z nx)
     endif()
 
     # banjo-nx (2026-10-17): the deko3d back end (plume_deko3d*.cpp, banjo-nx docs/deko3d-renderer.md): devkitPro's
@@ -191,6 +198,10 @@ if(PLUME_PLATFORM_SWITCH)
             "${CMAKE_CURRENT_SOURCE_DIR}/plume_deko3d.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/plume_deko3d_commands.cpp")
         target_compile_definitions(plume PUBLIC PLUME_DEKO3D=1)
+        # blur-nx (2026-11-18, the map-load crashes): libnx's gpfifo kickoff ioctl wrapped, so nvservices' refusals
+        # of a GPU submission are logged and the submission sent again in parts (plume_deko3d.cpp,
+        # __wrap_nvioctlChannel_KickoffPb).
+        target_link_options(plume INTERFACE "LINKER:--wrap=nvioctlChannel_KickoffPb")
         # uam's Mesa (19) and the static NVK's (a newer Mesa) define functions of the same names with other signatures
         # (ralloc, the linear allocator, hash tables): the linker gave uam's preprocessor NVK's linear_alloc_child, which
         # returned null (banjo-nx's first emulator runs, 2026-10-17). uam is linked into one object whose strong symbols

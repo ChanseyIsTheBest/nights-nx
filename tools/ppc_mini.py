@@ -4,7 +4,7 @@ register gets its value (jump tables, bounds checks, constants built with lis/ad
 condition fields an instruction writes. Vector and floating-point instructions are reported as writing no GPR.
 
   from ppc_mini import Image, decode
-  img = Image('out/renut_image.bin', 0x82000000)
+  img = Image('out/default_image.bin', 0x82000000)
   ins = decode(img.word(0x82141714), 0x82141714)   # ins.op == 'bctr'
 """
 import struct

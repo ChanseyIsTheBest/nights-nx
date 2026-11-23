@@ -118,6 +118,14 @@ bool LookupTablesOn();  // banjo_renut_record_lookups (command_buffers.cpp Recor
 void PrefetchGeometryObject(const GeometryObject *o, bool index);
 void PrefetchTextureObject(const TextureObject *o);
 void PrefetchGeometryCopies(const GeometryObject *o, bool index);
+// banjo-nx (2026-11-21, A/B 181): the store cards and page serial PagesClean reads first for a range at this physical
+// offset (PrefetchCards' lines), and the offset PhysicalOf gives for AddressPtr(address) (UINT32_MAX: no cards there).
+// Replay takes them from a record's header words alone (PrefetchRecordCards). Prefetches only.
+void PrefetchCardsAt(u32 offset);
+// banjo-nx (2026-11-21, batch 2's cache-warming helper): whether 'o' is one of the geometry objects' pool (the helper on
+// another core reads an object only then: the pool is never freed).
+bool GeometryObjectPooled(const GeometryObject *o);
+u32 CardOffsetOfAddress(u32 address);
 // banjo-nx (2026-10-28, ARM audit): kWords 32-bit words equal, as 64-bit loads, XORs and ORs with one test at the end (a
 // memcmp of a constant size is a call or a compare and branch a piece).
 template <u32 kWords>
@@ -190,7 +198,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call,
 // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): set by backend/queued.cpp around a draw of its delta chain
 // (banjo_renut_snapshot_deltas): the device chunks that changed since the chain's previous draw. The chain's chunks: the
 // 30 of 64 bytes before the float constants (device bytes 0-1919), then the bool constants on: banjo-nx (N&B's
-// 12,712-byte snapshot) 41 (10112-12711, the last one 40 bytes); SA2 47 (10112-13087). 'seq' numbers the chain's draws (consecutive, from 2; a whole copy marks every chunk); 0 for
+// 12,720-byte snapshot on title update 3) 41 (10112-12719, the last one 48 bytes); SA2 47 (10112-13087). 'seq' numbers the chain's draws (consecutive, from 2; a whole copy marks every chunk); 0 for
 // any other draw. A memo of a draw's derived state is valid for the next draw when its seq is the memo's + 1 and none
 // of the chunks it reads changed.
 // banjo-nx (2026-10-26, Unleashed-style step 1): 'fields', the device fields that changed since the previous draw
@@ -204,26 +212,37 @@ enum DrawField : u32 {
   kFieldViewPackets = 1u << 3,  // the window, values and control packets, 0x28C0-0x2967
   kFieldMisc = 1u << 4,         // the other packets, 0x2968-0x2A7F but 0x29C0
   kField29C0 = 1u << 5,         // the word ComputeViewport reads at 0x29C0
-  kFieldUnread = 1u << 6,       // 0x2A80-0x2DFF: the private words no draw reads
-  kFieldPrivate = 1u << 7,      // the private render state, 0x2E00-0x2EFF but the declaration
-  kFieldDecl = 1u << 8,         // the vertex declaration, 0x2E2C
-  kFieldTail = 1u << 9,         // the rest: 0x2F00-0x3093, 0x3168-0x3183, 0x319C-0x31A3
-  kFieldIndex = 1u << 10,       // the index buffer, 0x3094
-  kFieldTargets = 1u << 11,     // the render targets and the depth surface, 0x3098-0x30AB
-  kFieldStreams = 1u << 12,     // the stream sources and strides, 0x30AC-0x30FF
-  kFieldTexWords = 1u << 13,    // the texture words, 0x3100-0x3167
-  kFieldScissor = 1u << 14,     // SetScissorRect's RECT, 0x3184-0x3193
-  kFieldShaders = 1u << 15,     // the pixel and vertex shaders, 0x3194-0x319B
-  kFieldPredication = 1u << 16, // the predication, 0x31A4
+  kFieldUnread = 1u << 6,       // 0x2A80-0x2E03: the private words no draw reads
+  kFieldPrivate = 1u << 7,      // the private render state, 0x2E04-0x2F07 but the declaration
+  kFieldDecl = 1u << 8,         // the vertex declaration, 0x2E30
+  kFieldTail = 1u << 9,         // the rest: 0x2F08-0x309B, 0x3170-0x318B, 0x31A4-0x31AB
+  kFieldIndex = 1u << 10,       // the index buffer, 0x309C
+  kFieldTargets = 1u << 11,     // the render targets and the depth surface, 0x30A0-0x30B3
+  kFieldStreams = 1u << 12,     // the stream sources and strides, 0x30B4-0x3107
+  kFieldTexWords = 1u << 13,    // the texture words, 0x3108-0x316F
+  kFieldScissor = 1u << 14,     // SetScissorRect's RECT, 0x318C-0x319B
+  kFieldShaders = 1u << 15,     // the pixel and vertex shaders, 0x319C-0x31A3
+  kFieldPredication = 1u << 16, // the predication, 0x31AC
   // banjo-nx (2026-10-27, render thread night): the vertex fetch constants, 0x6F0-0x77F, apart from the texture ones: a
   // draw of another mesh changes its streams' fetch constants (72-77 % of the draws), which made every such draw take
   // its textures again as if a texture had changed (Unleashed's dirty flags are per object).
   kFieldVertexFetch = 1u << 17,
   kFieldsAll = (1u << 18) - 1,
 };
+// culdcept-nx (2026-11-19): the device's own vertex declaration (the one SetFVF builds inside the device:
+// kDeviceDeclarationOffset in draw.cpp, its elements from +52, at most 15 of 12 bytes). A new FVF rewrites it in place,
+// the declaration word at kDeviceOffsetVertexDeclaration keeping its address, so its bytes count as the declaration
+// too: the fast draw kept the draw before's vertex layout for Culdcept Saga's board panels (FVF quads), which then drew
+// wrong or not at all on deko3d (found with a field-forcing bisection in Ryujinx: forcing kFieldDecl alone brought them
+// back).
+// nights-nx (2026-11-22): NiGHTS's device holds it at +0x3118 (CreateDevice: `d.SetW(0x2FD0, d.va + 0x3118)`, as
+// SA2's XDK 2.0.21076; Katamari 0x2F98, N&B 0x2FA8).
+constexpr u32 kDeviceOwnDeclarationBegin = 0x3118, kDeviceOwnDeclarationEnd = 0x3118 + 52 + 15 * 12;
 constexpr u32 FieldOfOffset(u32 at) {
   if (at < 0x480)
     return 0;
+  if (at >= kDeviceOwnDeclarationBegin && at < kDeviceOwnDeclarationEnd)
+    return kFieldDecl | kFieldTail;
   if (at < 0x6F0)
     return kFieldFetch;
   if (at < 0x780)
@@ -251,27 +270,27 @@ constexpr u32 FieldOfOffset(u32 at) {
     return kFieldMisc;
   if (at < 0x2FC0)
     return kFieldUnread;
-  if (at >= 0x2FD0 && at < 0x2FD4)
+  if (at >= d3d::kDeviceOffsetVertexDeclaration && at < d3d::kDeviceOffsetVertexDeclaration + 4)
     return kFieldDecl;
   if (at < 0x3080)
     return kFieldPrivate;
-  if (at < 0x320C)
+  if (at < d3d::kDeviceOffsetIndexBuffer)
     return kFieldTail;
-  if (at < 0x3210)
+  if (at < d3d::kDeviceOffsetRenderTargets)
     return kFieldIndex;
-  if (at < 0x3224)
+  if (at < d3d::kDeviceOffsetStreamSources)
     return kFieldTargets;
-  if (at < 0x3278)
+  if (at < d3d::kDeviceOffsetTextures)
     return kFieldStreams;
-  if (at < 0x32E0)
+  if (at < d3d::kDeviceOffsetTextures + 4 * d3d::kTextureFetchSlots)
     return kFieldTexWords;
   if (at < 0x32FC)
     return kFieldTail;
-  if (at < 0x330C)
+  if (at < d3d::kDeviceOffsetPixelShader)
     return kFieldScissor;
-  if (at < 0x3314)
+  if (at < d3d::kDeviceOffsetVertexShader + 4)
     return kFieldShaders;
-  if (at < 0x331C)
+  if (at < d3d::kDeviceOffsetPredication)
     return kFieldTail;
   return kFieldPredication;
 }
@@ -375,11 +394,39 @@ struct HostTexture;
 // banjo-nx (2026-10-19, banjo_renut_depth_words_lazy): 'dest' (a depth resolve destination) is read through its words:
 // writes them now if its last resolve did not (from the unchanged source), and from now on at every resolve.
 void EnsureDepthWordsLocked(HostTexture &dest);
+// renut-ultimate (2026-11-13, sasrt-nx's resolve project R1, sasrt_gpu_diag_depth_words): the 10 s line's text (empty
+// with the key off); it starts the counts again.
+std::string DepthWordsCensusReport();
+// vivapinata-nx (2026-11-12, vivapinata_depth_resolve_skip_unread): a depth resolve destination is read (sampled, or
+// its words): its resolves are drawn from now on, and a resolve left out is drawn now.
+void DepthResolveReadLocked(HostTexture &dest, int path = 0);  // path: 0 slot, 1 alias, 2 words (the log)
 
 void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *source_rect,
                         u32 dest_texture_va, const d3d::TextureFetchConstant *dest_format,
                         i32 dest_x, i32 dest_y, u32 dest_level, u32 dest_slice,
                         const float clear_color[4], float clear_depth, u32 clear_stencil);
+
+// blur-nx (2026-11-13, cycle 3: M-35 of Blur's docs/cpu-moonshots-50-1113.md): of the device a resolve reads only
+// the words of SetRenderTarget's four targets and SetDepthStencilSurface's surface (kDeviceOffsetRenderTargets, then
+// kDeviceOffsetDepthStencil = kDeviceOffsetRenderTargets + 16), the source as word 'flags & 7' (0-7, so eight words:
+// what device.U32(kDeviceOffsetRenderTargets + source * 4) read). The queued resolve (backend/queued.cpp) keeps those
+// 32 bytes instead of copying the whole 12.9 KB device; ResolveStateLocked reads them out of a whole state and runs the
+// same code (exact: nothing else of the device is read).
+constexpr u32 kResolveTargetWords = 8;
+// blur-nx (2026-11-13, #55 of docs/cpu-near-exact-50-1113.md, exact): a clear reads of the device only the target words
+// above and the viewport's four floats (x, y, width, height at kClearViewportOffset: CDevice's, as D3D clamps a clear
+// to it). ClearTargetsLocked is the clear on those; ClearStateLocked reads them out of a whole state.
+// renut-ultimate (2026-11-14): the offset is the XDK's (d3d.h); blur-nx's 0x3218 is past Katamari's device snapshot.
+constexpr u32 kClearViewportOffset = d3d::kDeviceOffsetViewport;
+static_assert(kClearViewportOffset + 16 <= d3d::kDeviceSnapshotSize);
+void ReadClearViewport(const u8 *device_state, float viewport[4]);
+void ClearTargetsLocked(const u32 *target_words, const float *viewport, u32 flags, const ClearRect *rect,
+                        const float color[4], float depth, u32 stencil);
+void ReadResolveTargets(const u8 *device_state, u32 targets[kResolveTargetWords]);
+void ResolveTargetsLocked(const u32 *targets, u32 flags, const ClearRect *source_rect,
+                          u32 dest_texture_va, const d3d::TextureFetchConstant *dest_format,
+                          i32 dest_x, i32 dest_y, u32 dest_level, u32 dest_slice,
+                          const float clear_color[4], float clear_depth, u32 clear_stencil);
 
 // Reads render target 'source' (0-3) of the device state back for the CPU:
 // what a color resolve of its rect (0, 0, width, height) into an X8R8G8B8
@@ -392,6 +439,9 @@ bool ReadRenderTargetLocked(const u8 *device_state, u32 source, u32 &width, u32 
 
 // What Swap scans out for the guest front buffer texture, or an empty image.
 PresentImage FrontBufferImageLocked(u32 texture_va);
+// Port 169 (from fnxf_xiii; banjo_renut_scaler_crop): the same, scanning out the scaler's source rect (x1 y1 x2 y2,
+// guest pixels) when it is a part of the front buffer from its corner.
+PresentImage FrontBufferImageLocked(u32 texture_va, const i32 scaler[4]);
 // banjo-nx (2026-10-19): the texture at that address holds what a resolve wrote (not a new, uninitialised image).
 bool FrontBufferWrittenLocked(u32 texture_va);
 
@@ -434,6 +484,7 @@ bool SortableShadersLocked(u32 vs_va, u32 ps_va);
 bool ShaderSortableByHash(uint64_t hash, const ShaderCacheEntry *entry, bool pixel);
 void CountMergedDraws(uint64_t draws, uint64_t ops);
 std::string DrawKindsReport();
+std::string DroppedDrawsReport();  // halo3-nx (2026-11-03): draws that never reached the GPU, by why
 inline uint64_t RenderTicks() {
 #if defined(__aarch64__)
   uint64_t t;

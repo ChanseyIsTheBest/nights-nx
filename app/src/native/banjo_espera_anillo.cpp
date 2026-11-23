@@ -2,7 +2,7 @@
 //
 // The ring thread bumps a counter every time it writes the read pointer back or delivers an interrupt;
 // a game thread that would spin waiting for the GPU can instead sleep until it changes. NFSMW hooked its
-// two D3D polling loops (sub_825A5D18, sub_82597690) onto this; Banjo's equivalents are still to be
+// two D3D polling loops (sub_8258B040, sub_8257BC3C) onto this; Banjo's equivalents are still to be
 // identified, so for now only the ring side runs (AvisarProgresoAnillo is cheap with nobody waiting).
 
 #include <atomic>

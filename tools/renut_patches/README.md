@@ -11,4 +11,4 @@
   vendored copy is the one built. Regenerate with
   `git diff --no-index reNut/thirdparty/reblue-XenosRecomp/XenosRecomp banjo-nx/app/thirdparty/reblue-XenosRecomp/XenosRecomp`.
 
-What each change is and why: `docs/renut-renderer-port.md`.
+What each change is and why: renut-nx's [docs/renut-renderer-port.md](https://github.com/ChanseyIsTheBest/renut-nx/blob/master/docs/renut-renderer-port.md). These are banjo-nx's patches against reNut; the base's renderer has moved on since (docs/ultimate-fixes.md lists what changed).

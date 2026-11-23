@@ -62,8 +62,8 @@ namespace {
 
 // Where the bound shaders live inside the device object.
 // banjo-nx: Banjo-Kazooie: Nuts & Bolts links the 2008 XDK D3D, whose device layout differs from NFSMW's
-// 2005 one (0x4FE8 VS / 0x3290 PS). Read from sub_8222BF10, the shader part of the FlushState inlined into
-// D3DDevice_DrawVertices (sub_8222C7A0): it loads the VS from dev+12696 (an object with fields at +872 and
+// 2005 one (0x4FE8 VS / 0x3290 PS). Read from sub_821FAF10, the shader part of the FlushState inlined into
+// D3DDevice_DrawVertices (sub_821FB880): it loads the VS from dev+12696 (an object with fields at +872 and
 // +896, the extended shader object) and the PS from dev+12692. banjo_d3d_hooks.cpp checks both against the
 // objects the shader constructors returned and logs any mismatch.
 constexpr uint32_t kDispositivoVs = 0x3198;
@@ -583,21 +583,21 @@ uint64_t GeneracionObjetos() {
  * Draw* never exists for the ring.
  *
  * Why the whole Draw* can be removed (from reading the PowerPC code)
- *   - DrawVertices (82593A10) and DrawIndexedVertices (82593C50), before FlushState, only touch
+ *   - DrawVertices (82577CA8) and DrawIndexedVertices (82593C50), before FlushState, only touch
  *     VGT_INDX_OFFSET in the mirror (dev+0x2D14, with its dirty bit 1<<61 in dev+0x28): the same is done
  *     here. After FlushState they only write their DRAW_INDX (normal path: bit 0x04 of dev+0x28C0 clear and a
  *     single-segment count).
  *   - What the skipped FlushState would have dumped stays marked dirty and the next one dumps it (or the
- *     partial dump 825A42E0 of Resolve and ClearF) with the mirror's values, which are the same: the ring's
+ *     partial dump 82589120 of Resolve and ClearF) with the mirror's values, which are the same: the ring's
  *     state at the next draw is the usual one. The same goes for the shaders: their dirty bits stay set and
  *     the next FlushState patches and loads them for whatever shader pair is bound then.
- *   - What gets written to the ring without a dump first: the occlusion query (8258F810 and 8258EA28)
+ *   - What gets written to the ring without a dump first: the occlusion query (8257385C and 82572914)
  *     writes RB_MODECONTROL, RB_COLOR_INFO and RB_SAMPLE_COUNT_ADDR directly and leaves them dirty to be
  *     restored. In the ring the only lazy register read without a dump before it is RB_SURFACE_INFO
  *     (EscalaOclusion). That is why nothing is skipped with group 0x2000 dirty (render targets pending a
  *     dump) or with an occlusion query open.
  *   - Predicated tiling and ZPass: inside a D3D block (dev+0x28C0 & 0x3F: 0x10 tiling, 0x04 extension path
- *     with SET_BIN_MASK and EVENT_WRITE_EXT, 0x01, 0x02 and 0x20 ZPass, 0x08 the one from 825AB9A0) nothing
+ *     with SET_BIN_MASK and EVENT_WRITE_EXT, 0x01, 0x02 and 0x20 ZPass, 0x08 the one from 82590B98) nothing
  *     is skipped: there the packets are recorded to be replayed per tile.
  *
  * The criterion: Dibujar's up to its early discard, with the state the ring will see for that draw
@@ -605,7 +605,7 @@ uint64_t GeneracionObjetos() {
  *     the ring takes from the record).
  *   - Effective EDRAM mode 4. It is the mirror's (RB_MODECONTROL, dev+0x2D94) except for one change
  *     FlushState makes before dumping it: with a PS bound and its dirty bit 0x100 in dev+0x30, the shader
- *     loader (825A3AF0) calls 825A3A58, which turns mode 5 into 4. The switch to 5 (825A3968) only happens
+ *     loader (82588808) calls 82588770, which turns mode 5 into 4. The switch to 5 (82588680) only happens
  *     without a PS, and the streams (825A2D80) only set bit 0x80. No other function in the FlushState tree
  *     writes RB_MODECONTROL, RB_COLOR_MASK, RB_COLORCONTROL or the PS.
  *   - No color: no target i with RB_COLOR_MASK (dev+0x2D1C) nonzero and the PS writing it.
@@ -654,9 +654,9 @@ constexpr uint32_t kIndiceBase = 0x2D14;    // VGT_INDX_OFFSET (0x2102)
 constexpr uint32_t kSucios20 = 0x20;
 constexpr uint32_t kSucios28 = 0x28;
 constexpr uint32_t kSucios30 = 0x30;
-constexpr uint32_t kBloques = 0x28C0;      // D3D block byte (BeginTiling 825992F0, ZPass 825999D8...)
+constexpr uint32_t kBloques = 0x28C0;      // D3D block byte (BeginTiling 8257DE68, ZPass 8257E4E8...)
 constexpr uint8_t kBloquesMascara = 0x3F;  // 0x40 and 0x80 are set at device creation: not blocks
-constexpr uint32_t kTipoOclusion = 9;      // D3DQUERYTYPE_OCCLUSION, en consulta+4 (8258F810)
+constexpr uint32_t kTipoOclusion = 9;      // D3DQUERYTYPE_OCCLUSION, en consulta+4 (8257385C)
 constexpr uint32_t kMaxConsultas = 16;
 
 enum Que : uint32_t { kQueNada, kQueJuegoSi, kQueAnilloSi, kQueOclusion, kQueSinIdentidad, kQueModelo, kQues };
@@ -783,7 +783,7 @@ bool Estructura(const uint8_t* d, uint32_t& motivo) {
     return false;
   }
   // The EDRAM mode the ring will see: the mirror's, with the switch from 5 to 4 FlushState makes before
-  // dumping it if a PS is bound and its dirty bit is set (825A3AF0 and 825A3A58). Without a PS it already
+  // dumping it if a PS is bound and its dirty bit is set (82588808 and 82588770). Without a PS it already
   // returned above.
   uint32_t modo = LeerBE(d + kModoEdram) & 0x7;
   if (modo == 5 && (LeerBE64(d + kSucios30) & 0x100)) {

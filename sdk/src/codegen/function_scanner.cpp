@@ -499,11 +499,26 @@ static bool is_function_boundary(u32 code, const Instruction& instr, guest_addr_
 //=============================================================================
 // Helper: Detect jump table pattern at bctr instruction
 //=============================================================================
+namespace {
+// katamari-nx (2026-11-01): see FunctionScanner::setForcedIndirectCalls.
+std::unordered_set<uint32_t> g_forced_indirect_calls;
+}  // namespace
+
+void FunctionScanner::setForcedIndirectCalls(const std::unordered_set<uint32_t>& addresses) {
+  g_forced_indirect_calls = addresses;
+}
+
 std::optional<JumpTable> FunctionScanner::detect_jump_table(guest_addr_t bctr_address) {
   // Skip detection if this address has a manually-specified switch table
   if (known_switch_tables_.count(static_cast<uint32_t>(bctr_address))) {
     REXCODEGEN_TRACE("detect_jump_table: skipping 0x{:08X} (manual table exists)", bctr_address);
     return std::nullopt;  // Will be handled by the pre-loaded config
+  }
+  // katamari-nx (2026-11-01): a call through a table of function pointers, read as a jump table, became a switch on
+  // a register that does not hold the index (sub_822AC470: every call trapped, the supermarket DLC level).
+  if (g_forced_indirect_calls.count(static_cast<uint32_t>(bctr_address))) {
+    REXCODEGEN_TRACE("detect_jump_table: 0x{:08X} is an indirect call (config indirect_calls)", bctr_address);
+    return std::nullopt;
   }
 
   const int MAX_SCAN_BACK = static_cast<int>(REXCVAR_GET(backward_scan_limit));
@@ -1366,6 +1381,13 @@ std::optional<JumpTable> detectJumpTable(DecodedBinary& decoded, uint32_t bctrAd
                                          const CodeRegion& containingRegion, uint32_t funcStart,
                                          uint32_t funcEnd) {
   using namespace rex::codegen::ppc;
+
+  // katamari-nx (2026-11-01): the block discovery's detector (its tables go to the function nodes the emission reads)
+  // honours indirect_calls too; the scanner's method alone did not change the code.
+  if (g_forced_indirect_calls.count(bctrAddr)) {
+    REXCODEGEN_TRACE("detectJumpTable: 0x{:08X} is an indirect call (config indirect_calls)", bctrAddr);
+    return std::nullopt;
+  }
 
   const int kMaxBackwardScan = static_cast<int>(REXCVAR_GET(backward_scan_limit));
   const uint32_t kMaxTableEntries = REXCVAR_GET(max_jump_table_entries);

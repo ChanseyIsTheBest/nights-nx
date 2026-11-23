@@ -34,10 +34,11 @@
 #include "renut_engine/gpu/guest/guest_records.h"
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/backend/queued.h"
-#include "renut_engine/gpu/backend/frame_double.h"
 #include "renut_engine/gpu/backend/render_thread.h"
 #include "renut_engine/gpu/render/surfaces.h"
 #include "renut_engine/gpu/backend/video.h"
+#include "profiler/profiler.h"  // katamari-nx: the frame boundary at Present
+#include <atomic>
 
 using namespace renut::gpu;
 
@@ -62,10 +63,18 @@ std::mutex g_vertices_scratch_mutex;  // devices call from their own threads
 std::unordered_map<u32, u32> g_vertices_scratch;
 
 u32 VerticesScratch(u32 device) {
+  // blur-nx (2026-11-17, the 24-hour run): a device's scratch never changes once made (the map is never erased), so
+  // the thread's last answers are kept and a Begin*Vertices draw takes the lock only for a device new to its thread.
+  thread_local u32 t_device[4], t_scratch[4];
+  const u32 slot = (device * 2654435761u) >> 30;
+  if (t_device[slot] == device && t_scratch[slot])
+    return t_scratch[slot];
   std::lock_guard lock(g_vertices_scratch_mutex);
   u32 &scratch = g_vertices_scratch[device];
   if (!scratch)
     scratch = records::AllocPhysicalBlock(kVerticesScratchSize);
+  t_device[slot] = device;
+  t_scratch[slot] = scratch;
   return scratch;
 }
 
@@ -351,8 +360,6 @@ void D3DDevice_BeginTiling_hook(u32 device, u32 /*flags*/, u32 count, u32 rects_
       height = std::max(height, u32(rect.y2));
     }
     render_thread::Queue([tiles, width, height] {
-      if (frame_double::On())  // nights-nx (nights_present_60)
-        frame_double::LogTiling(width, height, tiles.data(), u32(tiles.size()));
       SetTilingExtentLocked(width, height);
       SetTilesLocked(tiles.data(), u32(tiles.size()));
     });
@@ -396,7 +403,7 @@ void D3DDevice_BeginTiling_hook(u32 device, u32 /*flags*/, u32 count, u32 rects_
     float color[4] = {0, 0, 0, 0};
     if (color_va)
       ReadVector4(color_va, color);
-    Clear(device, 0x3F, &rect, color, 0.0f, 0, true);
+    Clear(device, 0x3F, &rect, color, 0.0f, 0, true);  // nights-nx: 1.0.2's form (N&B's: Z 0.0, stencil 0)
     native::SetViewport(d, viewport[0], viewport[1], viewport[2], viewport[3], viewport[4],
                         viewport[5]);
     native::SetScissorRect(d, scissor[0], scissor[1], scissor[2], scissor[3]);
@@ -499,8 +506,6 @@ u32 D3DDevice_EndTiling_hook(u32 device, u32 /*resolve_flags*/, u32 /*rects_va*/
 
   if (!IsRecordingCommandBuffer(device)) {
     render_thread::Queue([] {
-      if (frame_double::On())  // nights-nx (nights_present_60)
-        frame_double::LogTiling(0, 0, nullptr, 0);
       SetTilingExtentLocked(0, 0);
       SetTilesLocked(nullptr, 0);
     });
@@ -552,7 +557,11 @@ void D3DDevice_Present_hook(u32 device) {
   native::SetViewport(d, viewport[0], viewport[1], viewport[2], viewport[3], viewport[4],
                       viewport[5]);
   native::SetScissorRect(d, scissor[0], scissor[1], scissor[2], scissor[3]);
-  native::Swap(device, front_buffer, device + 0x36DC);
+  native::Swap(device, front_buffer, device + 0x36DC);  // nights-nx: N&B 0x3548 (XDK 21173)
+  // katamari-nx: one game frame ends at Present (N&B's ended at its appMainDraw hook, renut_engine/FPS.cpp): frame
+  // time, the Switch profiler's frame marks, the stall watchdog. blur-nx (2026-11-17): g_banjo_game_frames is counted
+  // in the Swap hook (device.cpp) that native::Swap above runs: Blur swaps without Present.
+  banjo::profiler::FrameBoundary();
 }
 
 // void D3DDevice_SetVertexShader(D3DDevice*, D3DVertexShader*) [0x8222A0A8]

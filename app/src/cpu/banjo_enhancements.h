@@ -33,5 +33,7 @@ void CodegenChecksReport(int seconds);
 // copies, the small VMX helpers) on fixed edge inputs against plain C++ references and logs the result
 // (banjo_forms_selfcheck.cpp). Once, from LogEnhancements: on the console it is the first time the AArch64 forms run.
 void FormsSelfCheck();
+// blur-nx (2026-11-11): timings of a few processor forms at boot when blur_microbench is on (blur_microbench.cpp).
+void BlurMicrobench();
 
 }  // namespace banjo

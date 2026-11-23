@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 #include <utility>
 
 #include <rex/assert.h>
@@ -435,6 +436,19 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
         REXLOG_ERROR("Unhandled guest access violation at host PC {:p} ({}+0x{:X})",
                      reinterpret_cast<const void*>(ex->pc()), module_name,
                      uint64_t(ex->pc()) - uint64_t(reinterpret_cast<uintptr_t>(module)));
+        // nights-nx (2026-11-23, the 60 fps crash): the host stack too (this handler runs on the faulting thread, and the
+        // walk goes through the exception dispatcher into the faulting frames), as offsets in the executable for
+        // llvm-symbolizer: the generated functions are named by their guest address, so the guest's callers show
+        // even where the code keeps no saved LR.
+        {
+          void* frames[62] = {};
+          const USHORT count = RtlCaptureStackBackTrace(0, 62, frames, nullptr);
+          const uintptr_t exe = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+          std::string offsets;
+          for (USHORT i = 0; i < count; ++i)
+            offsets += fmt::format(" 0x{:X}", uintptr_t(frames[i]) - exe);
+          REXLOG_ERROR("Host stack ({} frames, offsets in the executable):{}", count, offsets);
+        }
 #else
         REXLOG_ERROR("Unhandled guest access violation at host PC {:p}",
                      reinterpret_cast<const void*>(ex->pc()));

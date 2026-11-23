@@ -8,6 +8,13 @@ import deko3d_glsl_opt as opt
 HERE = os.path.dirname(os.path.abspath(__file__))
 UAM = r'D:/Banjo kazooie port/banjo-nx/out/deko3d_tools/uam-build/uam.exe'
 SHTOOL = os.path.join(HERE, 'shtool', 'out', 'shtool.exe')
+# vivapinata-nx (2026-11-12): this repo's uam (the one the shader cache uses) and, while shtool is not built here,
+# banjo-nx's build of it (the same program); DIFFTEST_UAM / DIFFTEST_SHTOOL name others.
+_VIVA_UAM = os.path.join(os.path.dirname(os.path.dirname(HERE)), 'out', 'deko3d_tools', 'uam-build', 'uam.exe')
+UAM = os.environ.get('DIFFTEST_UAM') or (_VIVA_UAM if os.path.isfile(_VIVA_UAM) else UAM)
+if not os.path.isfile(SHTOOL):
+    SHTOOL = r'D:/Banjo kazooie port/banjo-nx/tools/difftest/shtool/out/shtool.exe'
+SHTOOL = os.environ.get('DIFFTEST_SHTOOL') or SHTOOL
 HEAD = '''#version 460
 layout(binding = 2, std140) uniform S { uvec4 v[84]; } g_UboShared;
 layout(binding = 1, std140) uniform P { vec4 v[256]; } g_UboPixel;
@@ -80,10 +87,25 @@ def conv(e):
 def transpile(code):
     body = code[code.index('void main()'):]
     out, ind = [], 0
-    for line in body.split('\n')[1:]:
-        line = line.strip()
-        if not line or line.startswith('//'):
-            continue
+    # vivapinata-nx (2026-11-12): each `do` paired with its `while (cond);` (the line after the block the do opens), so
+    # the loop can test cond at the top of every pass after the first: a `continue` then tests it too, as in GLSL
+    src = [l.strip() for l in body.split('\n')[1:]]
+    src = [l for l in src if l and not l.startswith('//')]
+    do_cond = {}
+    for k, l in enumerate(src):
+        if l == 'do' and k + 1 < len(src) and src[k + 1] == '{':
+            depth, j = 0, k + 1
+            while j < len(src):
+                depth += src[j] == '{'
+                depth -= src[j] == '}'
+                if depth == 0:
+                    break
+                j += 1
+            mw = re.match(r'^while \((.*)\);$', src[j + 1]) if j + 1 < len(src) else None
+            if not mw:
+                raise RuntimeError('a do without its while')
+            do_cond[k] = mw.group(1)
+    for k_line, line in enumerate(src):
         if re.match(r'^(precise )?(float|int|uint|bool|vec[234]) temp_\d+;$', line):
             continue
         if line == '{':
@@ -104,12 +126,38 @@ def transpile(code):
         if line in ('return;', 'discard;'):
             out.append(pad + ('raise Discard()' if line == 'discard;' else 'return'))
             continue
+        # vivapinata-nx (2026-11-12): `do { ... break; ... } while (true);`, the form Ryujinx's translator gives a loop
+        # left by a break (a tessellated vertex shader's division correction): a Python `while True:`
+        if line == 'do':
+            cond = do_cond[k_line]
+            if cond == 'true':
+                out.append(pad + 'while True:')
+            else:  # a pass after the first starts with the test (where the body's end or a continue left it)
+                out.append(pad + f'dw_{k_line} = False')
+                out.append(pad + 'while True:')
+                out.append(pad + f'    if dw_{k_line} and not ({conv(cond)}):')
+                out.append(pad + '        break')
+                out.append(pad + f'    dw_{k_line} = True')
+            continue
+        if re.match(r'^while \((.*)\);$', line):  # its do has it
+            continue
+        if line in ('break;', 'continue;'):
+            out.append(pad + line[:-1])
+            continue
         if re.match(r'^(while|for|do|switch|break|continue)\b', line):
             raise RuntimeError('loop in the decompile: ' + line)
+        # renut-ultimate (2026-11-12, port 94): the decompile's local memory (a vertex shader's constants copied for an
+        # indexed read: Beautiful Katamari's every vertex shader), a dict whose unwritten words read 0
+        ml = re.match(r'^local_memory\[(.*)\] = (.*);$', line)
+        if ml:
+            out.append(pad + f'local_memory[int({conv(ml.group(1))})] = ' + conv(ml.group(2)))
+            continue
         m = re.match(r'^(\w+(?:\.[xyzw])?) = (.*);$', line)
         if not m:
             raise RuntimeError('not understood: ' + line)
         out.append(pad + m.group(1).replace('.', '_') + ' = ' + conv(m.group(2)))
+    if 'local_memory' in body:  # renut-ultimate (port 94): see above
+        out.insert(0, "    local_memory = type('LocalMemory', (dict,), {'__missing__': lambda self, k: 0})()")
     # an if / else whose body was only comments
     fixed = []
     for k, l in enumerate(out):

@@ -67,8 +67,10 @@ COMMON = {
 }
 # The picture options (the user's decision), one config each in configs/: renut.toml with that change.
 CONFIGS = {
-    'renut_60fps.toml': ("60 frames a second of the game's own (one logic step a frame, the game's speed "
-                         "unchanged) instead of 30", {'nights_true60': 'true'}),
+    # 2026-11-23 (the user: "I want the game to be 60fps by default 30fps as an option instead"): renut_60fps.toml
+    # became renut_30fps.toml.
+    'renut_30fps.toml': ("30 frames a second (the game's two logic steps a frame, the camera paced evenly) instead "
+                         "of 60", {'nights_true60': 'false'}),
     'renut_exact.toml': ("the game's own picture (pixel-identical): 1280x720 in both modes, no SMAA",
                          {'banjo_renut_smaa': 'false', 'banjo_renut_render_height_docked': '720',
                           'banjo_renut_display_height_docked': '720'}),
@@ -84,6 +86,10 @@ CONFIGS = {
 }
 # The player's renut.toml (app/nights_switch.toml): the user's list of 2026-10-29, and (1.0.1, the user) nights_true60
 # off: the new 30 fps by default ("much much better camera framepacing"), the game's own 60 as the option.
+# 2026-11-22/23 (on the ultimate base): nights_true60_button_codes gone (the codes register whenever 60 fps is on), the
+# rumble line added (input_rumble, off as 1.0.2) and taken out again (2026-11-23, the user: "remove rumble from
+# the settings please since the game doesn't use it"), and 60 fps the default, 30 the option (the user,
+# 2026-11-23).
 PLAYER = '''# NiGHTS into Dreams... (nights-nx) settings, read at start. Everything else is built into nights-nx.nro; a setting
 # written here (or a file of configs/ copied over this one) overrides the built-in one.
 
@@ -93,12 +99,9 @@ language = "auto"
 # SMAA edge smoothing on the 3D (the HUD and text stay sharp). false = the game's own edges.
 banjo_renut_smaa = true
 
-# Frame rate. false = 30 (the game's two logic steps a frame, the camera paced evenly). true = 60 frames a second of
-# the game's own (one logic step a frame; the game's speed is unchanged).
-nights_true60 = false
-
-# With nights_true60 = true: the game's button-sequence codes register at 60 fps. false = they do not.
-nights_true60_button_codes = true
+# Frame rate. true = 60 frames a second of the game's own (one logic step a frame; the game's speed is
+# unchanged). false = 30 (the game's two logic steps a frame, the camera paced evenly).
+nights_true60 = true
 
 # Face buttons by position, as on an Xbox pad (bottom = A). false = by letter.
 input_xbox_layout = true
@@ -133,7 +136,8 @@ right = ""
 PLAY = {
     'banjo_renut_diag_resolve_trace': 'false', 'banjo_renut_diag_gpu_shaders': 'false', 'renut_gpu_profile': '0.0',
     'switch_profile_stacks': 'false', 'banjo_stall_watch_seconds': '0', 'banjo_cpu_profiler': 'false',
-    'banjo_show_fps': 'false', 'banjo_show_profiler': 'false', 'log_level': '"warning"',
+    # 2026-11-23: "off" (log_level takes trace, debug, info, warn, error, critical or off: "warning" was refused).
+    'banjo_show_fps': 'false', 'banjo_show_profiler': 'false', 'log_level': '"off"', 'switch_perf_count_calls': 'false',
 }
 AB = {
     # 30 s halves; 1 = banjo_renut_precise_barriers (Vulkan only: nothing changes on the Switch), the control.

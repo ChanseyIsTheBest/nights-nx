@@ -185,6 +185,13 @@ REXCVAR_DEFINE_INT32(masseffect_io_ranges_min_kb, 256, "Filesystem",
 REXCVAR_DEFINE_INT32(masseffect_io_ranges_min_mb, 0, "Filesystem",
                      "OBSOLETE (build 131): use masseffect_io_ranges_min_kb. If it is > 0 it takes precedence over the KB one.");
 
+// sasrt-nx (2026-11-09 night, the user: "15-20 more memory improvements"; SASRT's docked run mem12: 0 hits in 106
+// lookups over 15 minutes, 61 MB of heap held): with no hit once this many MB have gone in, the cache empties and stops
+// (the game reads from the SD as it would without it).
+REXCVAR_DEFINE_INT32(rex_io_ranges_auto_off_mb, 128, "Filesystem",
+                     "The range cache switches itself off (and frees its memory) when this many MB have gone in without "
+                     "a single hit; 0 never");
+
 // Per-entry ceiling: a single read cannot take more than this out of the total cap.
 REXCVAR_DEFINE_INT32(masseffect_io_ranges_max_mb, 12, "Filesystem",
                      "No entry of the range cache exceeds this many MB.");
@@ -401,6 +408,7 @@ std::vector<RangeEntry> g_ranges;
 uint64_t g_ranges_usage = 0;
 uint64_t g_ranges_bytes = 0;
 bool g_ranges_no_memory = false;  // turned itself off for lack of RAM: not retried
+uint64_t g_ranges_stored = 0;     // sasrt-nx (2026-11-09 night): bytes that went in (rex_io_ranges_auto_off_mb)
 
 // Counters. Atomic so the periodic summary can read them without taking the lock.
 std::atomic<uint64_t> g_ranges_hits{0};
@@ -503,6 +511,19 @@ void SaveRange(uint32_t id, uint64_t displacement, uint32_t request, const uint8
     if (g_ranges_no_memory) {
       return;
     }
+    // sasrt-nx (2026-11-09 night, rex_io_ranges_auto_off_mb): useless here: emptied and off (as for lack of RAM)
+    static const uint64_t auto_off = uint64_t(std::max(0, int(REXCVAR_GET(rex_io_ranges_auto_off_mb)))) << 20;
+    if (auto_off && g_ranges_stored >= auto_off && g_ranges_hits.load(std::memory_order_relaxed) == 0) {
+      const uint64_t had = g_ranges_bytes >> 20;
+      g_ranges_no_memory = true;
+      g_ranges.clear();
+      g_ranges_bytes = 0;
+      g_ranges_inputs.store(0, std::memory_order_relaxed);
+      g_ranges_bytes_live.store(0, std::memory_order_relaxed);
+      REXLOG_INFO("[io] range cache: no hit in {} MB stored, switched off ({} MB freed; rex_io_ranges_auto_off_mb)",
+                  g_ranges_stored >> 20, had);
+      return;
+    }
     // The load sweep does not go in. Decided here, before copying the megabytes.
     if (IsSweepAndNote(id, displacement, request)) {
       g_sequential_ranges.fetch_add(1, std::memory_order_relaxed);
@@ -547,6 +568,7 @@ void SaveRange(uint32_t id, uint64_t displacement, uint32_t request, const uint8
   new_entry.data = std::move(copy);
   new_entry.usage = ++g_ranges_usage;
   g_ranges_bytes += bytes;
+  g_ranges_stored += bytes;  // sasrt-nx (2026-11-09 night)
 
   // LRU: evict the oldest until it fits. The entry just added has the highest use count, so it is
   // never the one evicted.
@@ -565,6 +587,27 @@ void SaveRange(uint32_t id, uint64_t displacement, uint32_t request, const uint8
   g_ranges_bytes_live.store(g_ranges_bytes, std::memory_order_relaxed);
 }
 }  // namespace
+
+uint64_t TrimRangeCache(uint64_t keep_bytes) {  // sasrt-nx (2026-11-09): host_path_file.h
+  std::vector<std::shared_ptr<const std::vector<uint8_t>>> gone;  // freed outside the lock
+  uint64_t freed = 0;
+  {
+    std::lock_guard lock(g_ranges_mutex);
+    while (g_ranges_bytes > keep_bytes && !g_ranges.empty()) {
+      size_t old = 0;
+      for (size_t i = 1; i < g_ranges.size(); ++i)
+        if (g_ranges[i].usage < g_ranges[old].usage) old = i;
+      const uint64_t bytes = g_ranges[old].data ? g_ranges[old].data->size() : 0;
+      g_ranges_bytes -= std::min<uint64_t>(bytes, g_ranges_bytes);
+      freed += bytes;
+      gone.push_back(std::move(g_ranges[old].data));
+      g_ranges.erase(g_ranges.begin() + long(old));
+    }
+    g_ranges_inputs.store(g_ranges.size(), std::memory_order_relaxed);
+    g_ranges_bytes_live.store(g_ranges_bytes, std::memory_order_relaxed);
+  }
+  return freed;
+}
 
 StatsRanges ReadStatsRanges() {
   StatsRanges e;
@@ -643,10 +686,26 @@ HostPathFile::~HostPathFile() {
   if (counted_window_) {
     g_live_windows.fetch_sub(1, std::memory_order_relaxed);
   }
+  // culdcept-nx (2026-11-20, filesystem_keep_open): a read-only open of a read-only device leaves its handle parked for
+  // the next open of the same file (HostPathEntry::Park).
+  const bool wants_write =
+      (file_access() & (FileAccess::kGenericWrite | FileAccess::kFileWriteData |
+                        FileAccess::kFileAppendData | FileAccess::kGenericAll)) != 0;
+  if (file_handle_ && entry() && entry()->is_read_only() && !wants_write) {
+    static_cast<HostPathEntry*>(entry())->Park(std::move(file_handle_));
+  }
 }
 
 void HostPathFile::Destroy() {
+  // renut-ultimate (2026-11-20, port 203): sims3-nx (github.com/Zumoly/sims3-nx, GPL-3.0, v0.1.1). Nothing acted on FileDispositionInformation's delete flag
+  // (xboxkrnl_io_info.cpp records it on the entry), so a file a game marks for deletion stayed: The Sims 3 deletes a
+  // marker when a save is complete, and every save loaded as corrupt. Horizon cannot delete an open file, so this
+  // runs after the handle is closed; with another handle still open the delete fails, and that handle's close tries
+  // again.
+  rex::filesystem::Entry* const closing = entry();
+  const bool remove = closing && closing->delete_on_close();
   delete this;
+  if (remove) closing->Delete();
 }
 
 // fsync on POSIX, FlushFileBuffers on Windows. Called by NtFlushBuffersFile, which the game uses right

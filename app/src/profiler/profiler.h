@@ -30,6 +30,10 @@ void RecordLimiterWait(double ms);  // time slept by the frame cap (Unleashed: "
 // End of one game frame, on the game's main thread: the frame time, and the frame markers of the
 // Switch CPU profiler (slow-frame reports) and stall watchdog.
 void FrameBoundary();
+// blur-nx (2026-11-18): the same at the game's Swap (renut::frame_stats::OnGameFrame), unless a Present hook gave a
+// boundary in the last second: Blur swaps without Present, so FrameBoundary never ran there (the slow-frame report
+// said "0 of 0 frames" and the stall watchdog saw no frame).
+void FrameBoundaryAtSwap();
 
 // The renderer: GPU time of the last finished frame, and host presents (Unleashed: "Present").
 void SetGpuFrameMs(double ms);

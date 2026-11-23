@@ -37,7 +37,13 @@ if(NOT REXGLUE_SWITCH_NVK AND NOT TARGET rex::nvk)
     target_link_directories(rexglue_switch_nvk INTERFACE
         "${DEVKITPRO}/portlibs/switch/lib"
         "${DEVKITPRO}/libnx/lib")
-    target_link_libraries(rexglue_switch_nvk INTERFACE zstd z nx stdc++ m)
+    # renut-ultimate (2026-11-20, port 194; TFU-nx's of 2026-11-12, via S4ep1-nx): libzstd only when the switch-zstd
+    # portlib is installed. Without NVK nothing here needs it (Renut decompresses with its own copy, renut_zstd), and
+    # -lzstd with no library stops the link.
+    if(EXISTS "${DEVKITPRO}/portlibs/switch/lib/libzstd.a")
+        target_link_libraries(rexglue_switch_nvk INTERFACE zstd)
+    endif()
+    target_link_libraries(rexglue_switch_nvk INTERFACE z nx stdc++ m)
     target_link_options(rexglue_switch_nvk INTERFACE -pthread)
 endif()
 if(NOT TARGET rex::nvk)
@@ -71,6 +77,8 @@ if(NOT TARGET rexglue_switch_startup)
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/runtime_switch.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_elf_stubs.c"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_crash_hooks.c"
+        # kameo-nx (2026-11-05): the NRO's code on 2 MB blocks.
+        "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_code_blocks.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_perf.cpp"
         # FPS and resolution for the console overlays (SaltyNX) and Reverse-NX reading.
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_saltynx.cpp"
@@ -91,6 +99,8 @@ if(NOT TARGET rexglue_switch_startup)
         "LINKER:--wrap=nvFenceWait,--wrap=nvGpuChannelKickoff,--wrap=nvMapCreate"
         "LINKER:--wrap=nvAddressSpaceAllocFixed,--wrap=nvioctlNvhostAsGpu_MapBufferEx"
         "LINKER:--wrap=armDCacheClean,--wrap=nwindowQueueBuffer,--wrap=bqDequeueBuffer"
+        # renut-ultimate (2026-11-16, port 145): async present (switch_perf.cpp, banjo_async_present).
+        "LINKER:--wrap=nwindowDequeueBuffer"
         "LINKER:--wrap=svcSleepThread,--wrap=svcSetThreadCoreMask")
 endif()
 

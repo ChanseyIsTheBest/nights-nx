@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>  // blur-nx (2026-11-17): ResolveRemakeReport
 #include <vector>
 
 #include <plume_render_interface.h>
@@ -33,6 +34,10 @@ struct HostTexture {
   u32 guest_va = 0;
   u32 base_page = 0;  // banjo-nx (2026-10-27): its fetch constant's base page as made (BumpTextureBindings)
   u32 desc[6] = {};  // the header fetch constant bits that define the data
+  // blur-nx (2026-11-17, audit #4, blur_renut_texture_pool): how Create made 'texture' (a render target only), and the
+  // image it made, so Retire gives back to the pool only that image under that description.
+  plume::RenderTextureDesc pool_desc{};
+  const plume::RenderTexture *pool_texture = nullptr;
 
   TextureDimension dimension = TextureDimension::Tex2D;
   GpuTextureFormat guest_format = GpuTextureFormat::Fmt8_8_8_8;
@@ -111,6 +116,13 @@ struct HostTexture {
   bool sample_known = false;
   uint32_t sample_pages[2] = {};
   uint32_t sample_sizes[2] = {};
+  // dishonored-nx (2026-10-31, dishonored_renut_zero_level_recheck; port 104): a tiled texture with a level whose guest
+  // data was all zeros at the upload. Its whole guest extent is hashed (zero_hash) every 8 frames (zero_check_frame)
+  // until it changes, then uploaded again: SampleHash reads the ends and eight 64-byte probes, and a game's streaming
+  // writes the small levels (the packed tail) between them after the texture was first bound.
+  bool zero_levels = false;
+  uint64_t zero_hash = 0;
+  uint64_t zero_check_frame = 0;
 
   // Depth resolve destinations: the guest words the resolve wrote (see
   // shaders/host/depth_resolve.hlsli) and the framebuffer over both targets.
@@ -134,6 +146,11 @@ struct HostTexture {
   uint64_t last_source_writes = 0;
   int32_t last_src[4] = {};
   int32_t last_dest_x = 0, last_dest_y = 0;
+  // vivapinata-nx (2026-11-12, vivapinata_depth_resolve_skip_unread; render/draw.cpp DepthResolveReadLocked): read,
+  // something has sampled this depth resolve destination (its float or its words), or a destination at its address
+  // before; skipped, its last resolve was left out (the last_* fields above say from where and what).
+  bool depth_read = false;
+  bool depth_skipped = false;
   // A texture over a depth resolve's memory: the resolve its words were
   // copied from last.
   uint64_t copied_resolve = 0;
@@ -154,6 +171,8 @@ struct HostTexture {
   uint64_t handed_writes = 0;
   std::shared_ptr<DepthImage> held;
   bool held_current = false;
+  // kameo-nx (2026-11-03, banjo_deko3d_color_handover): the resolve left in that image is a colour resolve.
+  bool handed_color = false;
 };
 
 struct TextureBinding {
@@ -277,8 +296,12 @@ void PrefetchTextureGuestExtent(const TextureFetch &fetch);
 // GPU-written. 'header_format', when given, is the header's fetch constant as
 // it was when the resolve was recorded (the header may be a temporary the
 // game has since overwritten).
+// blur-nx (2026-11-10, port 76; its key 212: blur_renut_resolve_keep_dest): 'cover_pixels', when not 0, is how many
+// pixels a single-sampled resolve writes: one that covers less than an existing destination of another format keeps it
+// (the caller then writes its part with a converting draw: dest->host_format != format).
 HostTexture *GetResolveTextureLocked(u32 texture_va, plume::RenderFormat format, RenderScale scale,
-                                     const d3d::TextureFetchConstant *header_format = nullptr);
+                                     const d3d::TextureFetchConstant *header_format = nullptr,
+                                     uint32_t cover_pixels = 0);
 
 // The same for a depth resolve: a kDepthResolveFormat target plus the guest
 // words (kDepthResolveWordsFormat), which a texture of a 32-bit 8_8_8_8
@@ -289,20 +312,29 @@ HostTexture *GetDepthResolveTextureLocked(u32 texture_va, RenderScale scale,
 
 // Existing host texture for a guest texture VA, or nullptr.
 HostTexture *FindHostTextureLocked(u32 texture_va);
+// vivapinata-nx (2026-11-11): 't''s texels as stored (no swizzle, no red-blue swap), or kInvalidDescriptor.
+uint32_t RawViewSlotLocked(HostTexture &t);
 
 void ReleaseHostTextureLocked(u32 texture_va);
 
 // The game freed the guest memory at physical address 'physical' ('size'
 // bytes): the host textures whose data was there go. N&B's level textures are
-// headers it sets up itself (XGSetTextureHeader, sub_823191B8 and the
-// streaming's sub_8230B360) over data in its section pools; D3D never destroys
+// headers it sets up itself (XGSetTextureHeader, sub_822E8660 and the
+// streaming's sub_822DAB48) over data in its section pools; D3D never destroys
 // them, and the game drops them by destroying the pool at a section change
 // (game/level_pools.cpp).
+// blur-nx (2026-11-17, the Renut audit's #4 and #5): why resolve destinations are made, and the texture pool; the
+// 10 s line (banjo_renut_tuning.cpp), atomics only.
+std::string ResolveRemakeReport();
 void ReleaseHostTexturesInMemoryLocked(u32 physical, u32 size);
 
 void TransitionTextureLocked(HostTexture *texture, plume::RenderTextureLayout layout);
 // banjo-nx (2026-10-19): a layout a texture is only read in (banjo_deko3d_barrier_lean).
 bool ReadOnlyLayout(plume::RenderTextureLayout layout);
+// Port 161 (banjo_deko3d_vertex_texture_barrier): every layout move notes a GPU write; a draw whose vertex shader
+// samples textures calls the barrier first.
+void NoteGpuWriteLayoutLocked(plume::RenderTextureLayout layout);
+void VertexTextureBarrierLocked();
 
 // Rebuilds the host levels of a resolve destination (HostTexture::extra_levels)
 // over 'rect' of level 0, in host texels, after a resolve wrote it. Leaves the
@@ -318,6 +350,10 @@ void FlushResolveMipsLocked(HostTexture &t);
 // (plume's Vulkan resolve writes every level of its destination, from levels
 // the source does not have). Its texture and layout only; kept for reuse.
 HostTexture *ResolveStagingLocked(const HostTexture *dest);
+// blur-nx (2026-11-10, port 76; its key 219: blur_renut_resolve_exp_bias): a single-sampled target of this format and
+// host size (a scratch target) to resolve a whole multisampled target into, and its bindless slot, to draw from it.
+HostTexture *ResolveSourceStagingLocked(plume::RenderFormat format, uint32_t width, uint32_t height);
+uint32_t ResolveSourceStagingSlotLocked(plume::RenderFormat format, uint32_t width, uint32_t height);
 
 // Bindless sampler slot matching the device fetch constant's sampler state.
 // 'lod_scale' (TextureBinding::lod_scale): a texture with host levels, which

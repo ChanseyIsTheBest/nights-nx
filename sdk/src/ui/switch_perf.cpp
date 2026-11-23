@@ -43,6 +43,7 @@
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>  // blur-nx (2026-11-16): strtol (switch_profile_stacks_ms)
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -54,6 +55,7 @@
 
 // banjo-nx (2026-10-27): the system core (core/threading_switch.cpp; its header clashes with switch.h).
 extern "C" int RexSwitchSystemCore(void);
+extern "C" int RexSwitchApplyNamedPriority(unsigned handle, const char* name);  // blur-nx: switch_thread_priorities
 extern "C" int RexSwitchSystemCoreMode(void);
 extern "C" unsigned RexSwitchAppCoreMask(void);
 extern "C" bool RexSwitchCoreIdleSample(int core, unsigned long long* idle_ticks, unsigned long long* at_ticks);
@@ -83,6 +85,7 @@ Result __real_nvioctlNvhostAsGpu_MapBufferEx(u32 fd, u32 flags, u32 kind, u32 nv
                                              u64 buffer_offset, u64 mapping_size, u64 input_offset, u64* offset);
 void __real_armDCacheClean(void* addr, size_t size);
 Result __real_nwindowQueueBuffer(NWindow* nw, s32 slot, const NvMultiFence* fence);
+Result __real_nwindowDequeueBuffer(NWindow* nw, s32* out_slot, NvMultiFence* out_fence);  // port 145: async present
 Result __real_bqDequeueBuffer(Binder* b, bool async, u32 width, u32 height, s32 format, u32 usage, s32* buf,
                               NvMultiFence* fence);
 void __real_svcSleepThread(s64 nano);
@@ -117,6 +120,13 @@ constexpr size_t kMaxSamples = 1 << 15;
 constexpr size_t kFrames = 10;
 // 0-32 renderer/audio counters (see RexSwitchPerfAdd); 40-55 host-runtime overhead (include/rex/sys_counters.h).
 constexpr unsigned kCounterCount = 64;
+}  // namespace
+extern "C" const char* RexAppBuildStamp(void);  // port 193: switch_crash_hooks.c (weak), app/src/build_stamp.cpp
+namespace {
+// banjo-nx (2026-11-01, the public build; port 230): whether rex_profile.log is written (logging on, or stack
+// sampling).
+bool g_write_reports = true;
+
 // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
 std::string ReportPath() {
   return std::string(RexSwitchLogDir()) + "rex_profile.log";
@@ -130,8 +140,18 @@ struct Slot {
   u64 last_ticks = 0;
   bool busy = true;
   double cpu = 0.0;
+  // sasrt-nx (2026-11-09; port 58, the guest threads' 16 MB host stacks: ~500 MB of heap in SASRT): the deepest the
+  // sampled sp has been below the top of its stack mapping (svcQueryMemory of sp), since the slot's thread registered.
+  std::atomic<u64> stack_deepest{0};
+  // blur-nx (2026-11-13, M-44 of Blur's docs/cpu-moonshots-50-1113.md; the census of #34 in docs/cpu-near-exact-50-1113.md):
+  // the thread's svcSleepThread calls by kind, written by the thread itself (its slot found once, a thread_local), read
+  // by the report: yields (0, -1, -2), short sleeps (up to 1 ms) and the ticks spent inside them, longer sleeps.
+  std::atomic<u64> yields{0}, sleeps{0}, sleep_ticks{0}, long_sleeps{0};
+  u64 last_yields = 0, last_sleeps = 0, last_sleep_ticks = 0, last_long = 0;  // the profiler thread's
+  double yields_s = 0.0, sleeps_s = 0.0, sleep_ms = 0.0, long_s = 0.0;
 };
 Slot g_slots[kMaxThreads];
+std::atomic<u64> g_stack_deepest_all{0};  // port 58: the deepest of any thread so far
 // Exclusive core for the hottest guest thread (the game's main thread): -1 = off. See ApplyExclusiveCore.
 std::atomic<int> g_exclusive_core{-1};
 std::atomic<bool> g_light_core{false};
@@ -160,7 +180,30 @@ std::atomic<u32> g_num_hitches{0};
 Sample g_samples[kMaxSamples];
 size_t g_sample_count = 0;
 
-std::atomic<u64> g_counters[kCounterCount];
+// blur-nx (2026-11-13, cycle 3, M-39's kind: Blur's docs/cpu-moonshots-50-1113.md): the counters in kCounterShards sets
+// on lines of their own, a thread's set picked by its TLS slot (tpidrro_el0, one register read; libnx's slots are 0x200
+// bytes apart). They were one array every thread added to: the kernel's REX_SYS_COUNT sites alone ~20,000 times a
+// second in Blur's races (ObjectTable lookups 11,700, signals with nobody blocked 8,000), each add an exclusive
+// load/store loop on a line other cores had just written. Two threads that share a set still count right (atomic
+// adds); CounterRead sums the sets. The max counters (RexSwitchPerfMax, 23) are set 0's alone (nothing adds to them).
+constexpr unsigned kCounterShards = 8;
+struct alignas(64) CounterShard {
+  std::atomic<u64> c[kCounterCount];
+};
+CounterShard g_counter_shards[kCounterShards];
+
+inline std::atomic<u64>& CounterOf(unsigned id) {
+  const uintptr_t tls = reinterpret_cast<uintptr_t>(armGetTls());
+  return g_counter_shards[(tls >> 9) % kCounterShards].c[id];
+}
+
+u64 CounterRead(unsigned id) {
+  u64 sum = 0;
+  for (const CounterShard& shard : g_counter_shards) {
+    sum += shard.c[id].load(std::memory_order_relaxed);
+  }
+  return sum;
+}
 
 /*
  * Wrapped libnx calls (see the file header): how many, how much time inside and, where it makes
@@ -189,11 +232,31 @@ struct Calls {
   std::atomic<u64> ticks{0};
   std::atomic<u64> bytes{0};
 };
-Calls g_calls[kCallsCount];
+// blur-nx (2026-11-13, cycle 3, M-39's kind: Blur's docs/cpu-moonshots-50-1113.md): the counters in kCallShards sets, a
+// thread's set picked by its TLS slot (tpidrro_el0, one register read; libnx's slots are 0x200 bytes apart), each set on
+// lines of its own. They were one array every thread added to: svcSleepThread alone ~4,500 times a second from the job
+// workers' yields (each add an exclusive load/store loop on a line the other cores had just written). Two threads that
+// share a set still count right (the adds are atomic); the report sums the sets.
+constexpr unsigned kCallShards = 8;
+struct alignas(64) CallShard {
+  Calls calls[kCallsCount];
+};
+CallShard g_call_shards[kCallShards];
+
+inline Calls& CallsOf(unsigned id) {
+  const uintptr_t tls = reinterpret_cast<uintptr_t>(armGetTls());
+  return g_call_shards[(tls >> 9) % kCallShards].calls[id];
+}
+
+// blur-nx (2026-11-17, the Renut audit's #29): the wrapped libnx calls' counters (the "libnx per second" line), off
+// with the title's switch_perf_count_calls = false (read by ProfilerMain after its warm-up; counted until then): a
+// shipping config that reads no reports skips a clock read and two atomics per kick, mapping, cache clean and yield.
+std::atomic<bool> g_count_calls{true};
 
 inline void Note(unsigned id, u64 from, u64 bytes = 0) {
+  if (!g_count_calls.load(std::memory_order_relaxed)) return;
   const u64 ticks = armGetSystemTick() - from;
-  Calls& l = g_calls[id];
+  Calls& l = CallsOf(id);
   l.n.fetch_add(1, std::memory_order_relaxed);
   l.ticks.fetch_add(ticks, std::memory_order_relaxed);
   if (bytes) {
@@ -290,6 +353,11 @@ void Register(Handle h) {
     u32 expected = 0;
     if (s.handle.compare_exchange_strong(expected, h)) {
       s.name[0] = 0;
+      s.stack_deepest.store(0, std::memory_order_relaxed);  // port 58
+      s.last_yields = s.yields.load(std::memory_order_relaxed);  // blur-nx (M-44): a reused slot's counts go on
+      s.last_sleeps = s.sleeps.load(std::memory_order_relaxed);
+      s.last_sleep_ticks = s.sleep_ticks.load(std::memory_order_relaxed);
+      s.last_long = s.long_sleeps.load(std::memory_order_relaxed);
       return;
     }
   }
@@ -418,7 +486,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
 
   u64 counters_now[kCounterCount];
   for (unsigned i = 0; i < kCounterCount; ++i) {
-    counters_now[i] = g_counters[i].load(std::memory_order_relaxed);
+    counters_now[i] = CounterRead(i);
   }
 
   // CPU of each thread over the interval, as % of one core.
@@ -443,6 +511,21 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
     }
     s.cpu = double(ticks - s.last_ticks) * 100.0 / double(elapsed_ticks);
     s.last_ticks = ticks;
+    {  // blur-nx (2026-11-13, M-44): the thread's sleeps and yields in the interval
+      const double seconds = double(elapsed_ticks) / double(armGetSystemTickFreq());
+      const u64 y = s.yields.load(std::memory_order_relaxed), n = s.sleeps.load(std::memory_order_relaxed);
+      const u64 t = s.sleep_ticks.load(std::memory_order_relaxed), l = s.long_sleeps.load(std::memory_order_relaxed);
+      s.yields_s = double(y - s.last_yields) / seconds;
+      s.sleeps_s = double(n - s.last_sleeps) / seconds;
+      s.sleep_ms = n != s.last_sleeps ? double(t - s.last_sleep_ticks) * 1000.0 / double(armGetSystemTickFreq()) /
+                                            double(n - s.last_sleeps)
+                                      : 0.0;
+      s.long_s = double(l - s.last_long) / seconds;
+      s.last_yields = y;
+      s.last_sleeps = n;
+      s.last_sleep_ticks = t;
+      s.last_long = l;
+    }
     /*
      * All threads are sampled, including those that use no CPU. In a hang caused by
      * a wait, the thread that matters is exactly that one: the stopped one.
@@ -453,7 +536,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
   std::sort(order.begin(), order.end(),
             [](size_t a, size_t b) { return g_slots[a].cpu > g_slots[b].cpu; });
 
-  FILE* f = std::fopen(ReportPath().c_str(), "a");
+  FILE* f = g_write_reports ? std::fopen(ReportPath().c_str(), "a") : nullptr;  // banjo-nx (port 230)
   if (!f) {
     g_sample_count = 0;
     return;
@@ -495,12 +578,14 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
   // Mix clipping before conversion to 16 bits (21 samples above 1.0, 22 buffers with a peak of 0.98 or
   // more, 23 maximum peak of the interval in ten-thousandths) and the console mode, for the crackling
   // in handheld mode.
-  const u64 audio_peak = g_counters[23].exchange(0, std::memory_order_relaxed);
+  const u64 audio_peak = g_counter_shards[0].c[23].exchange(0, std::memory_order_relaxed);  // a max: set 0's
   std::fprintf(f,
                "     audio: %.0f client blocks mixed, %.0f requests without data, "
                "%.0f/%.0f audout buffers with non-zero PCM, %.0f saturated samples (above 1.0 before clipping), "
-               "%.0f buffers with a peak of 0.98 or more, maximum peak %.3f | console in %s mode\n",
+               "%.0f buffers with a peak of 0.98 or more, maximum peak %.3f | audout played %.0f samples (%.0f Hz), "
+               "%.0f wakes with every buffer released | console in %s mode\n",
                delta(24), delta(25), delta(26), delta(27), delta(21), delta(22), double(audio_peak) / 10000.0,
+               delta(57), delta(57) / seconds, delta(58),
                rex::ui::switch_saltynx::BaseMode(appletGetOperationMode() == AppletOperationMode_Console)
                    ? "docked"
                    : "handheld");
@@ -604,9 +689,12 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
     static u64 last[kCallsCount][3];
     double n[kCallsCount], ms[kCallsCount], mb[kCallsCount];
     for (unsigned i = 0; i < kCallsCount; ++i) {
-      const u64 vn = g_calls[i].n.load(std::memory_order_relaxed);
-      const u64 vt = g_calls[i].ticks.load(std::memory_order_relaxed);
-      const u64 vb = g_calls[i].bytes.load(std::memory_order_relaxed);
+      u64 vn = 0, vt = 0, vb = 0;  // blur-nx (2026-11-13): the sets summed (CallShard)
+      for (const CallShard& shard : g_call_shards) {
+        vn += shard.calls[i].n.load(std::memory_order_relaxed);
+        vt += shard.calls[i].ticks.load(std::memory_order_relaxed);
+        vb += shard.calls[i].bytes.load(std::memory_order_relaxed);
+      }
       n[i] = double(vn - last[i][0]) / seconds;
       ms[i] = double(vt - last[i][1]) * 1000.0 / double(tick_freq) / seconds;
       mb[i] = double(vb - last[i][2]) / 1048576.0 / seconds;
@@ -749,9 +837,13 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
     svcGetThreadCoreMask(&preferred, &mask, s.handle.load());
     std::fprintf(f,
                  "\n-- thread %" PRIu64 " \"%s\": CPU %.1f%% | priority 0x%X, preferred core %d, "
-                 "mask 0x%llX\n",
+                 "mask 0x%llX | stack %llu KB deepest sampled (all threads %llu KB) | per second: yields %.0f, "
+                 "sleeps up to 1 ms %.0f (%.2f ms each), longer sleeps %.1f\n",
                  tid, s.name[0] ? s.name : "?", s.cpu, static_cast<unsigned>(priority),
-                 static_cast<int>(preferred), static_cast<unsigned long long>(mask));
+                 static_cast<int>(preferred), static_cast<unsigned long long>(mask),
+                 static_cast<unsigned long long>(s.stack_deepest.load(std::memory_order_relaxed) >> 10),
+                 static_cast<unsigned long long>(g_stack_deepest_all.load(std::memory_order_relaxed) >> 10),
+                 s.yields_s, s.sleeps_s, s.sleep_ms, s.long_s);
 
     auto lo = std::lower_bound(samples.begin(), samples.end(), i,
                                [](const Sample& a, size_t v) { return a.slot < v; });
@@ -898,7 +990,7 @@ struct TicOverlay {
 
   void Boot(u64 now) {
     tic = now;
-    presented = g_counters[0].load(std::memory_order_relaxed);
+    presented = CounterRead(0);
     // Publish what is known right away: the resolution is valid from the first instant (g_resolution
     // starts at 1280x720 and the game corrects it when choosing the video mode), so the overlay's RES
     // row can show up even before the first frame.
@@ -913,7 +1005,7 @@ struct TicOverlay {
       return;
     }
     const double seconds = double(now - tic) / double(freq);
-    const u64 presented_now = g_counters[0].load(std::memory_order_relaxed);
+    const u64 presented_now = CounterRead(0);
     const double fps = seconds > 0.0 ? double(presented_now - presented) / seconds : 0.0;
     media[pos] = fps;
     pos = (pos + 1) % 10;
@@ -954,8 +1046,13 @@ struct TicOverlay {
 // generator's fp_moves_modeless, fp_mode_lookahead and fp_copy_pairs) hangs on that cost, which had never been
 // measured on the A57. Four loops of the same shape, the best of five runs each: empty, a read, a write of the
 // value already there, a write that toggles FZ (what a real switch does). Run once, for the report's header.
+// renut-ultimate (2026-11-13, from sasrt-nx's handoff of 2026-11-13): also FPSR's read and clear, and one exclusive
+// increment of a cache-resident word, relaxed (ldxr/stxr) and acquire/release (ldaxr/stlxr): what a guest lwarx/stwcx.
+// pair costs in each form (sasrt-nx's A57, handheld: 17.6 and 26.4 ns).
 struct FpcrCost {
   double read_ns, write_same_ns, write_toggle_ns;
+  double fpsr_read_ns = 0, fpsr_clear_ns = 0;
+  double llsc_relaxed_ns = 0, llsc_acqrel_ns = 0;
 };
 FpcrCost MeasureFpcrCost(u64 tick_freq) {
   constexpr int kCount = 200000;
@@ -974,6 +1071,19 @@ FpcrCost MeasureFpcrCost(u64 tick_freq) {
         } else if (kind == 3) {
           v ^= u64(1) << 24;  // FZ
           asm volatile("msr fpcr, %0" : : "r"(v));
+        } else if (kind == 4) {
+          asm volatile("mrs %0, fpsr" : "=r"(v));
+        } else if (kind == 5) {
+          asm volatile("msr fpsr, %0" : : "r"(u64(0)));
+        } else if (kind == 6 || kind == 7) {  // an exclusive increment, as a guest lwarx/stwcx.
+          static u32 word = 0;
+          u32 t, fail;
+          if (kind == 6)
+            asm volatile("1: ldxr %w0, [%2]\n add %w0, %w0, #1\n stxr %w1, %w0, [%2]\n cbnz %w1, 1b"
+                         : "=&r"(t), "=&r"(fail) : "r"(&word) : "memory");
+          else
+            asm volatile("1: ldaxr %w0, [%2]\n add %w0, %w0, #1\n stlxr %w1, %w0, [%2]\n cbnz %w1, 1b"
+                         : "=&r"(t), "=&r"(fail) : "r"(&word) : "memory");
         } else {
           asm volatile("" : "+r"(v));
         }
@@ -985,7 +1095,15 @@ FpcrCost MeasureFpcrCost(u64 tick_freq) {
     return double(best) * 1e9 / double(tick_freq) / double(kCount);
   };
   const double empty = loop(0);
-  return {loop(1) - empty, loop(2) - empty, loop(3) - empty};
+  u64 fpsr_saved;
+  asm volatile("mrs %0, fpsr" : "=r"(fpsr_saved));
+  FpcrCost out{loop(1) - empty, loop(2) - empty, loop(3) - empty};
+  out.fpsr_read_ns = loop(4) - empty;
+  out.fpsr_clear_ns = loop(5) - empty;
+  out.llsc_relaxed_ns = loop(6) - empty;
+  out.llsc_acqrel_ns = loop(7) - empty;
+  asm volatile("msr fpsr, %0" : : "r"(fpsr_saved));
+  return out;
 }
 
 void ProfilerMain(void*) {
@@ -1007,6 +1125,11 @@ void ProfilerMain(void*) {
     overlay.Step(armGetSystemTick(), tick_freq, false);
   }
 
+  // blur-nx (2026-11-17, audit #29): switch_perf_count_calls (the title's cvar; true when it has none).
+  {
+    const std::string value = rex::cvar::GetFlagByName("switch_perf_count_calls");
+    if (value == "false" || value == "0") g_count_calls.store(false, std::memory_order_relaxed);
+  }
   // Invasive sampling is only enabled explicitly, for diagnostics.
   // The normal mode keeps FPS, CPU and counters, without stopping the game.
   bool sample_stacks = false;
@@ -1020,20 +1143,44 @@ void ProfilerMain(void*) {
     const std::string value = rex::cvar::GetFlagByName("switch_profile_stacks");
     if (value == "true" || value == "1") sample_stacks = true;
   }
+  // blur-nx (2026-11-16, the 15 ms batch): the interval between two stack samples, from the title's cvar
+  // switch_profile_stacks_ms (1 when it has none). Each sample pauses one game thread (svcSetThreadActivity), reads its
+  // context and stack and resumes it, from a thread above every game thread: at 1 ms that is ~1,000 pauses and ~5,000
+  // system calls a second, which no report counts (the sampler leaves itself out).
+  u64 sample_interval_ns = kSampleIntervalNs;
+  {
+    const std::string value = rex::cvar::GetFlagByName("switch_profile_stacks_ms");
+    const long ms = value.empty() ? 0 : std::strtol(value.c_str(), nullptr, 10);
+    if (ms >= 1 && ms <= 100) sample_interval_ns = u64(ms) * 1000000ULL;
+  }
 
   u64 counters_last[kCounterCount]{};
   for (unsigned i = 0; i < kCounterCount; ++i) {
-    counters_last[i] = g_counters[i].load(std::memory_order_relaxed);
+    counters_last[i] = CounterRead(i);
   }
-  if (FILE* f = std::fopen(ReportPath().c_str(), "w")) {
+  // banjo-nx (2026-11-01, the public build; port 230): rex_profile.log only with logging on (log_level not "off"),
+  // or with stack sampling; port 193's copy of the last one only then too.
+  g_write_reports = rex::cvar::GetFlagByName("log_level") != "off" || sample_stacks;
+  // Port 193 (TFU-nx's): the last launch's report kept as rex_profile.prev.log, and the build stamp first.
+  if (g_write_reports) {
+    const std::string prev = std::string(RexSwitchLogDir()) + "rex_profile.prev.log";
+    std::remove(prev.c_str());
+    if (std::rename(ReportPath().c_str(), prev.c_str()) != 0) std::remove(ReportPath().c_str());
+  }
+  if (FILE* f = g_write_reports ? std::fopen(ReportPath().c_str(), "w") : nullptr) {
+    std::fprintf(f, "%s\n", RexAppBuildStamp());
     std::fprintf(f, "image 0x%016" PRIx64 ", code up to 0x%016" PRIx64 "\n\n", g_base,
                  g_text_hi);
-    std::fprintf(f, "Stack sampling: %s\n", sample_stacks ? "active (1 ms)" : "disabled");
+    std::fprintf(f, "Stack sampling: %s (%u ms)\n", sample_stacks ? "active" : "disabled",
+                 unsigned(sample_interval_ns / 1000000ULL));
     const FpcrCost fpcr = MeasureFpcrCost(tick_freq);
     std::fprintf(f,
                  "FPCR on this CPU (per access, loop overhead taken off): read %.1f ns, write of the same value "
-                 "%.1f ns, write that toggles the flush mode %.1f ns (one cycle is 0.98 ns at 1020 MHz)\n",
-                 fpcr.read_ns, fpcr.write_same_ns, fpcr.write_toggle_ns);
+                 "%.1f ns, write that toggles the flush mode %.1f ns (one cycle is 0.98 ns at 1020 MHz); FPSR: read "
+                 "%.1f ns, write of zero %.1f ns; an exclusive increment: relaxed (ldxr/stxr) %.1f ns, acquire/release "
+                 "(ldaxr/stlxr) %.1f ns\n",
+                 fpcr.read_ns, fpcr.write_same_ns, fpcr.write_toggle_ns, fpcr.fpsr_read_ns, fpcr.fpsr_clear_ns,
+                 fpcr.llsc_relaxed_ns, fpcr.llsc_acqrel_ns);
     std::fclose(f);
   }
 
@@ -1048,7 +1195,7 @@ void ProfilerMain(void*) {
   size_t rr = 0;
   size_t mode_index = 0;
   while (true) {
-    __real_svcSleepThread(sample_stacks ? kSampleIntervalNs : kPassiveIntervalNs);
+    __real_svcSleepThread(sample_stacks ? sample_interval_ns : kPassiveIntervalNs);
 
     for (size_t tries = 0; sample_stacks && tries < kMaxThreads; ++tries) {
       const size_t idx = rr;
@@ -1063,6 +1210,19 @@ void ProfilerMain(void*) {
       }
       ThreadContext ctx;
       const Result rc = svcGetThreadContext3(&ctx, h);
+      if (R_SUCCEEDED(rc)) {  // sasrt-nx (2026-11-09; port 58): the stack's depth at this sample (top: the mapping's end)
+        MemoryInfo dmi;
+        u32 dpi = 0;
+        if (R_SUCCEEDED(svcQueryMemory(&dmi, &dpi, ctx.sp)) && (dmi.perm & Perm_R)) {
+          const u64 top = dmi.addr + dmi.size;
+          const u64 depth = top > ctx.sp ? top - ctx.sp : 0;
+          if (depth > s.stack_deepest.load(std::memory_order_relaxed)) {
+            s.stack_deepest.store(depth, std::memory_order_relaxed);
+            if (depth > g_stack_deepest_all.load(std::memory_order_relaxed))
+              g_stack_deepest_all.store(depth, std::memory_order_relaxed);
+          }
+        }
+      }
       if (R_SUCCEEDED(rc) && g_sample_count < kMaxSamples) {
         Sample& out = g_samples[g_sample_count++];
         out = {};
@@ -1097,7 +1257,24 @@ void ProfilerMain(void*) {
     // Once per second, FPS and resolution for the overlay (the profile report runs every 10 s).
     overlay.Step(now, tick_freq, true);
     if (now - report_start >= kReportSeconds * tick_freq) {
+      // sasrt-nx (2026-11-11, port 71): the report sorts and groups up to 32k stack samples and writes ~800 lines to
+      // the SD, and it ran here at 0x2A, above every game thread, on a core the game's threads use. Only the 1 ms
+      // samples need 0x2A (to be on time): the report is written at the game's lowest priority (0x3B), from the system
+      // core when the process has one (RexSwitchSystemCore, four-core mode), then the sampler goes back to its priority
+      // and core. Very likely this removed a ~100 ms render stall in every 10 s window: sasrt-nx's fixed-resolution
+      // races at the handheld clocks, stack sampling off, had a ~105 ms worst frame in 5 of 7 windows before the move and
+      // 17-28 ms in every window after (different builds and drivers, not a same-build A/B). Its earlier long frames
+      // every 10 s with screenshots were the test bot's own (sys-botbase's pixelPeek stalls the game ~250 ms a capture).
+      s32 report_core = -2;
+      u64 report_mask = 0;
+      const int system_core = RexSwitchSystemCore();
+      const bool moved = system_core >= 0 &&
+                         R_SUCCEEDED(svcGetThreadCoreMask(&report_core, &report_mask, CUR_THREAD_HANDLE)) &&
+                         R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, system_core, 1ull << system_core));
+      svcSetThreadPriority(CUR_THREAD_HANDLE, 0x3B);
       Report(now - report_start, tick_freq, counters_last, kModes[mode_index].name);
+      if (moved) svcSetThreadCoreMask(CUR_THREAD_HANDLE, report_core, report_mask);
+      svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2A);
       if (g_ab_active.load(std::memory_order_relaxed)) {
         mode_index = (mode_index + 1) % kModeCount;
         g_skip_mask.store(kModes[mode_index].mask, std::memory_order_relaxed);
@@ -1164,7 +1341,7 @@ Result __wrap_threadClose(Thread* t) {
   return __real_threadClose(t);
 }
 
-/* libnx calls that cost IPC or walk memory. See g_calls. */
+/* libnx calls that cost IPC or walk memory. See CallShard. */
 Result __wrap_nvFenceWait(NvFence* f, s32 timeout_us) {
   const u64 from = armGetSystemTick();
   const Result rc = __real_nvFenceWait(f, timeout_us);
@@ -1172,10 +1349,16 @@ Result __wrap_nvFenceWait(NvFence* f, s32 timeout_us) {
   return rc;
 }
 
+// Port 167 (from fnxf_xiii): plume_deko3d_commands.cpp, the channel's report of a failed kickoff (weak: a build
+// without plume's deko3d back end has none).
+extern "C" __attribute__((weak)) void RexSwitchGpuKickoffFailed(NvGpuChannel* channel, uint32_t rc);
+
 Result __wrap_nvGpuChannelKickoff(NvGpuChannel* c) {
   const u64 from = armGetSystemTick();
   const Result rc = __real_nvGpuChannelKickoff(c);
   Note(kKickoff, from);
+  if (R_FAILED(rc) && RexSwitchGpuKickoffFailed)
+    RexSwitchGpuKickoffFailed(c, rc);
   return rc;
 }
 
@@ -1223,12 +1406,145 @@ void __wrap_armDCacheClean(void* addr, size_t size) {
  */
 std::atomic<unsigned> g_interval_swap{0};
 
+/*
+ * renut-ultimate (2026-11-16, port 145; tw2de_nx's tw2de_async_present of 2026-11-13, ON at the user's word: "port the
+ * speed ups as on by default"; the key banjo_async_present, app/src/renut_engine/gpu/banjo_renut_tuning.cpp): the
+ * window's two binder calls off the presenting thread.
+ *
+ * nwindowQueueBuffer and the bqDequeueBuffer inside nwindowDequeueBuffer are binder transactions answered by the
+ * compositor's process: tw2de_nx measured 1.40 and 1.33 ms a call in its heaviest 10 s, 2.7 ms a frame in which the
+ * renderer's feed thread only waits. With the key on, a helper thread makes them: the queue call returns at once, the
+ * helper queues the buffer and right away dequeues the next one, which the next nwindowDequeueBuffer call takes
+ * (waiting for the helper if it is not there yet). The same calls on the window in the same order (queue N, dequeue,
+ * queue N+1, ...), so the same buffers at the same vblanks; only the caller no longer waits for the answers. A dequeue
+ * that finds no free buffer blocks the helper as it blocked the caller, and the caller then waits at its next dequeue:
+ * the pacing at the frame cap is the same. RexSwitchPerfPresentQuiesce: before a swapchain lets go of the window
+ * (libnx refuses to release its buffers while one is dequeued), the buffer dequeued ahead is cancelled (plume).
+ */
+struct AsyncPresent {
+  Mutex mutex = 0;
+  CondVar work = 0, done = 0;
+  Thread thread{};
+  std::atomic<int> state{0};   // 0 not asked yet, 1 on (the helper runs), -1 off
+  bool queue_pending = false;  // a queue call the helper has not finished (the dequeue after it included)
+  NWindow* nw = nullptr;
+  s32 queue_slot = -1;
+  bool queue_has_fence = false;
+  NvMultiFence queue_fence{};
+  bool held = false;           // the dequeue made ahead, not yet taken by a caller
+  Result held_rc = 0;
+  s32 held_slot = -1;
+  NvMultiFence held_fence{};
+};
+static AsyncPresent g_async;
+
+static void AsyncPresentMain(void*) {
+  AsyncPresent& a = g_async;
+  mutexLock(&a.mutex);
+  for (;;) {
+    while (!a.queue_pending) condvarWait(&a.work, &a.mutex);
+    NWindow* const nw = a.nw;
+    const s32 slot = a.queue_slot;
+    const bool has_fence = a.queue_has_fence;
+    const NvMultiFence fence = a.queue_fence;
+    mutexUnlock(&a.mutex);
+    const u64 from = armGetSystemTick();
+    __real_nwindowQueueBuffer(nw, slot, has_fence ? &fence : nullptr);
+    Note(kQueueBuffer, from);
+    s32 next = -1;
+    NvMultiFence next_fence{};
+    const Result rc = __real_nwindowDequeueBuffer(nw, &next, &next_fence);
+    mutexLock(&a.mutex);
+    a.held = true;
+    a.held_rc = rc;
+    a.held_slot = next;
+    a.held_fence = next_fence;
+    a.queue_pending = false;
+    condvarWakeAll(&a.done);
+  }
+}
+
+// Whether the helper makes the calls (decided at the first queue call: the config is read by then).
+static bool AsyncPresentOn() {
+  AsyncPresent& a = g_async;
+  int state = a.state.load(std::memory_order_acquire);
+  if (state == 0) [[unlikely]] {
+    const std::string value = rex::cvar::GetFlagByName("banjo_async_present");
+    state = -1;
+    if (value == "true" || value == "1") {
+      // Cores 0 and 2 (not the feed thread's core 1), at the top priority the process may use: it runs for
+      // microseconds between its waits.
+      if (R_SUCCEEDED(threadCreate(&a.thread, AsyncPresentMain, nullptr, nullptr, 0x10000, 0x2C, 2))) {
+        svcSetThreadCoreMask(a.thread.handle, 2, 0x5);
+        if (R_SUCCEEDED(threadStart(&a.thread))) state = 1;
+      }
+    }
+    a.state.store(state, std::memory_order_release);
+  }
+  return state > 0;
+}
+
+// The queue call handed to the helper. False: not handed (the caller makes it).
+static bool AsyncPresentQueue(NWindow* nw, s32 slot, const NvMultiFence* fence) {
+  AsyncPresent& a = g_async;
+  mutexLock(&a.mutex);
+  while (a.queue_pending) condvarWait(&a.done, &a.mutex);
+  if (a.held) {
+    // A buffer dequeued ahead that no caller took: this slot did not come from it. Not expected (a caller dequeues
+    // before it queues); the caller makes this call itself.
+    mutexUnlock(&a.mutex);
+    return false;
+  }
+  a.nw = nw;
+  a.queue_slot = slot;
+  a.queue_has_fence = fence != nullptr;
+  if (fence) a.queue_fence = *fence;
+  a.queue_pending = true;
+  condvarWakeOne(&a.work);
+  mutexUnlock(&a.mutex);
+  return true;
+}
+
+Result __wrap_nwindowDequeueBuffer(NWindow* nw, s32* out_slot, NvMultiFence* out_fence) {
+  AsyncPresent& a = g_async;
+  if (a.state.load(std::memory_order_acquire) <= 0) return __real_nwindowDequeueBuffer(nw, out_slot, out_fence);
+  mutexLock(&a.mutex);
+  while (a.queue_pending) condvarWait(&a.done, &a.mutex);
+  if (a.held && a.nw == nw) {
+    a.held = false;
+    const Result rc = a.held_rc;
+    if (R_SUCCEEDED(rc)) {
+      if (out_slot) *out_slot = a.held_slot;
+      if (out_fence) *out_fence = a.held_fence;
+    }
+    mutexUnlock(&a.mutex);
+    return rc;
+  }
+  mutexUnlock(&a.mutex);
+  return __real_nwindowDequeueBuffer(nw, out_slot, out_fence);
+}
+
+void RexSwitchPerfPresentQuiesce(NWindow* nw) {
+  AsyncPresent& a = g_async;
+  if (a.state.load(std::memory_order_acquire) <= 0) return;
+  mutexLock(&a.mutex);
+  while (a.queue_pending) condvarWait(&a.done, &a.mutex);
+  if (a.held && a.nw == nw) {
+    a.held = false;
+    if (R_SUCCEEDED(a.held_rc)) nwindowCancelBuffer(nw, a.held_slot, &a.held_fence);
+  }
+  mutexUnlock(&a.mutex);
+}
+
 Result __wrap_nwindowQueueBuffer(NWindow* nw, s32 slot, const NvMultiFence* fence) {
   const u64 from = armGetSystemTick();
   const unsigned request = g_interval_swap.load(std::memory_order_relaxed);
   if (request != 0 && nw != nullptr && nw->swap_interval != request) {
     nwindowSetSwapInterval(nw, request);
   }
+  // Port 145 (banjo_async_present): handed to the helper when it runs.
+  if (AsyncPresentOn() && AsyncPresentQueue(nw, slot, fence))
+    return 0;
   const Result rc = __real_nwindowQueueBuffer(nw, slot, fence);
   Note(kQueueBuffer, from);
   return rc;
@@ -1242,10 +1558,44 @@ Result __wrap_bqDequeueBuffer(Binder* b, bool async, u32 width, u32 height, s32 
   return rc;
 }
 
+// blur-nx (2026-11-13, M-44): the calling thread's slot, found once (none: not registered, e.g. the main thread).
+Slot* CurrentSlot() {
+  thread_local size_t index = SIZE_MAX;
+  if (index == SIZE_MAX) [[unlikely]] {
+    const u32 h = threadGetCurHandle();
+    index = kMaxThreads;
+    for (size_t i = 0; i < kMaxThreads; ++i) {
+      if (g_slots[i].handle.load(std::memory_order_relaxed) == h) {
+        index = i;
+        break;
+      }
+    }
+  }
+  return index < kMaxThreads ? &g_slots[index] : nullptr;
+}
+
+void AddOwn(std::atomic<u64>& counter, u64 value) {  // one writer: a load and a store
+  counter.store(counter.load(std::memory_order_relaxed) + value, std::memory_order_relaxed);
+}
+
 void __wrap_svcSleepThread(s64 nano) {
+  if (!g_count_calls.load(std::memory_order_relaxed)) {  // blur-nx (2026-11-17, audit #29)
+    __real_svcSleepThread(nano);
+    return;
+  }
   const u64 from = armGetSystemTick();
   __real_svcSleepThread(nano);
   Note(nano == 0 ? kSleep0 : nano < 0 ? kSleepYield : nano <= 1000000 ? kSleepShort : kSleepLong, from);
+  if (Slot* slot = CurrentSlot()) {  // blur-nx (2026-11-13, M-44): the thread's own counters
+    if (nano <= 0) {
+      AddOwn(slot->yields, 1);
+    } else if (nano <= 1000000) {
+      AddOwn(slot->sleeps, 1);
+      AddOwn(slot->sleep_ticks, armGetSystemTick() - from);
+    } else {
+      AddOwn(slot->long_sleeps, 1);
+    }
+  }
 }
 
 /*
@@ -1283,7 +1633,7 @@ void RexSwitchPerfIntervalSwap(unsigned vblanks) {
 
 void RexSwitchPerfCount(unsigned id) {
   if (id < kCounterCount) {
-    g_counters[id].fetch_add(1, std::memory_order_relaxed);
+    CounterOf(id).fetch_add(1, std::memory_order_relaxed);
   }
   if (id == 0) {
     // Counter 0 is presents. The console overlay clears the "alive" mark and the resolution mark and
@@ -1304,7 +1654,7 @@ void RexSwitchPerfCount(unsigned id) {
  */
 void RexSwitchPerfAdd(unsigned id, u64 value) {
   if (id < kCounterCount) {
-    g_counters[id].fetch_add(value, std::memory_order_relaxed);
+    CounterOf(id).fetch_add(value, std::memory_order_relaxed);
   }
 }
 
@@ -1313,8 +1663,9 @@ void RexSwitchPerfMax(unsigned id, u64 value) {
   if (id >= kCounterCount) {
     return;
   }
-  u64 actual = g_counters[id].load(std::memory_order_relaxed);
-  while (value > actual && !g_counters[id].compare_exchange_weak(actual, value, std::memory_order_relaxed)) {
+  std::atomic<u64>& max = g_counter_shards[0].c[id];  // blur-nx (2026-11-13): set 0's (CounterShard)
+  u64 actual = max.load(std::memory_order_relaxed);
+  while (value > actual && !max.compare_exchange_weak(actual, value, std::memory_order_relaxed)) {
   }
 }
 
@@ -1330,6 +1681,8 @@ void RexSwitchPerfSetThreadName(u32 handle, const char* name) {
   if (!handle || !name) {
     return;
   }
+  // blur-nx (2026-11-12, CPU batch 3): a named thread's priority from switch_thread_priorities (threading_switch.cpp).
+  RexSwitchApplyNamedPriority(handle, name);
   if (RexSwitchAppThreadNamed) {
     RexSwitchAppThreadNamed(handle, name);
   }

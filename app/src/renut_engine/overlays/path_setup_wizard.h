@@ -2,6 +2,7 @@
 #include <rex/ui/imgui_dialog.h>
 #include <rex/rex_app.h>
 #include "imgui.h"
+#include "renut_engine/overlays/app_imgui.h"  // renut-ultimate (port 66)
 #include "renut_engine/path_config_store.h"
 #include <filesystem>
 #include <functional>
@@ -52,6 +53,7 @@ public:
 
     void OnDraw(ImGuiIO& io) override {
         if (!visible_) return;
+        if (!AppImGuiReady()) return;  // renut-ultimate (port 66)
 
         ImGui::SetNextWindowSize(ImVec2(580, 230), ImGuiCond_Always);
         ImGui::SetNextWindowPos(

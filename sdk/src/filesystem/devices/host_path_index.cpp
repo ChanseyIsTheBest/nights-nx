@@ -134,7 +134,11 @@ bool ListLight(const std::string& path, std::vector<LightEntry>* output) {
 namespace {
 
 constexpr char kMagic[8] = {'R', 'X', 'V', 'F', 'S', 'I', 'D', 'X'};
-constexpr uint32_t kVersion = 1;
+// 2 (nights-nx 2026-11-22, culdcept-nx's of 2026-11-20): each file's size on the SD and, for a NAME.lz4b or NAME.adxo,
+// the size it stands for (version 1 kept only the size the guest sees, which for a packed file never matches the SD's
+// listing: every start would scan the whole tree).
+constexpr uint32_t kVersion = 2;
+constexpr uint64_t kNotPacked = ~uint64_t(0);
 constexpr size_t kHeader = 8 + 4 + 4 + 8 + 8 + 8;
 // Sanity limits for parsing a damaged file: nothing in a game folder comes close.
 constexpr uint32_t kMaxName = 4096;
@@ -227,7 +231,8 @@ void SerializeDirectory(Writer& w, HostPathEntry* dir, uint64_t* count) {
     // The name exactly as the host listing returned it (host_path's last component), which is
     // what PopulateEntry fed to HostPathEntry::Create.
     w.String(rex::path_to_utf8(child->host_path().filename()));
-    w.Pod<uint64_t>(uint64_t(child->size()));
+    w.Pod<uint64_t>(is_dir ? uint64_t(child->size()) : child->disk_size());
+    w.Pod<uint64_t>(!is_dir && child->packed() ? uint64_t(child->size()) : kNotPacked);
     w.Pod<uint64_t>(child->create_timestamp());
     w.Pod<uint64_t>(child->access_timestamp());
     w.Pod<uint64_t>(child->write_timestamp());
@@ -321,9 +326,9 @@ bool BuildDirectory(Context& ctx, Reader& r, HostPathEntry* dir, int depth,
     uint8_t type = 0;
     FileInfo info;
     std::string name;
-    uint64_t size = 0, ct = 0, at = 0, wt = 0;
+    uint64_t size = 0, held = 0, ct = 0, at = 0, wt = 0;
     if (!r.Pod(&type) || type > 1 || !r.String(&name, kMaxName) || name.empty() ||
-        !r.Pod(&size) || !r.Pod(&ct) || !r.Pod(&at) || !r.Pod(&wt)) {
+        !r.Pod(&size) || !r.Pod(&held) || !r.Pod(&ct) || !r.Pod(&at) || !r.Pod(&wt)) {
       ctx.reason = "corrupt data";
       return false;
     }
@@ -334,7 +339,8 @@ bool BuildDirectory(Context& ctx, Reader& r, HostPathEntry* dir, int depth,
     info.create_timestamp = ct;
     info.access_timestamp = at;
     info.write_timestamp = wt;
-    auto* child = HostPathEntry::Create(ctx.device, dir, dir->host_path() / info.name, info);
+    auto* child = HostPathEntry::Create(ctx.device, dir, dir->host_path() / info.name, info,
+                                        held == kNotPacked ? HostPathEntry::kPackedNot : int64_t(held));
     dir->AddChildIndex(child);
     ++ctx.inputs;
     if (type) {
@@ -380,7 +386,7 @@ bool ValidateDirectory(HostPathEntry* dir, uint64_t* directories, std::string* r
     auto* child = static_cast<HostPathEntry*>(h.get());
     const bool is_dir = (child->attributes() & kFileAttributeDirectory) != 0;
     b.emplace_back(rex::path_to_utf8(child->host_path().filename()), is_dir,
-                   is_dir ? 0 : uint64_t(child->size()));
+                   is_dir ? 0 : child->disk_size());  // the SD's size (a NAME.lz4b's own), as the listing has it
   }
   std::sort(a.begin(), a.end());
   std::sort(b.begin(), b.end());

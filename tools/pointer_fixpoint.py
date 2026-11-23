@@ -16,7 +16,7 @@ the first time it is called. Each pass:
   5. the accepted ones go to app/overrides.toml with their evidence (where the pointer is stored), and the real
      codegen runs again, so the next pass sees the code they exposed.
 
-  python tools/pointer_fixpoint.py [--image out/renut_image.bin] [--scratch out/ptrscan] [--dry-run]
+  python tools/pointer_fixpoint.py [--image out/default_image.bin] [--scratch out/ptrscan] [--dry-run]
 
 Needs rexglue (sdk/out/<platform>/rexglue[.exe] or $REXGLUE), the game in assets/game_root, an existing generated
 tree and an image dump (REXGLUE_DUMP_IMAGE during codegen writes one).
@@ -30,12 +30,23 @@ import struct
 import subprocess
 import sys
 
+
+def gen_file(gen, suffix):
+    """renut-ultimate (2026-11-19, port 186; found by sasrt-nx's sync): the generator names its files after the project
+    (<project>_pch.h, <project>_init.cpp, <project>_recomp.N.cpp): renut_ in the base, a port's own name otherwise."""
+    for name in sorted(os.listdir(gen)):
+        m = re.fullmatch(r'(\w+)_recomp\.\d+\.cpp', name)
+        if m:
+            return os.path.join(gen, m.group(1) + '_' + suffix)
+    return os.path.join(gen, 'renut_' + suffix)
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, 'app')
 TOOLS = os.path.join(ROOT, 'tools')
-GEN = os.path.join(APP, 'generated')
+GEN = os.path.join(APP, 'generated')  # katamari-nx: one flat tree
 MANIFEST = os.path.join(APP, 'renut_manifest.toml')
-OVERRIDES = os.path.join(APP, 'config', 'renut_funcs.toml')
+OVERRIDES = os.path.join(APP, 'overrides.toml')
 IMAGE_BASE = 0x82000000
 CODE_LO, CODE_HI = 0x82140000, 0x828AF6A8  # set from the generated tree in main()
 
@@ -56,8 +67,7 @@ def find_rexglue():
 def code_range():
     # The generator writes the code range into the generated precompiled header (REX_CODE_BASE / REX_CODE_SIZE);
     # older SDKs wrote it into the init file (PPCImageConfig).
-    for name in ('renut_pch.h', 'renut_init.cpp'):
-        path = os.path.join(GEN, name)
+    for path in (gen_file(GEN, 'pch.h'), gen_file(GEN, 'init.cpp'), gen_file(GEN, 'config.h')):
         if not os.path.exists(path):
             continue
         text = open(path, errors='replace').read()
@@ -81,27 +91,40 @@ def read_gaps(scratch):
 
 
 def built_addresses(image, lo, hi):
-    """Code addresses the code builds as constants: `lis rX,hi` followed (within 8 instructions, before rX is written
+    """Code addresses the code builds as constants: `lis rX,hi` followed (within 32 instructions, before rX is written
     again) by `addi rY,rX,lo` or `ori rY,rX,lo`. That is how a function pointer is passed as a callback or stored in
     a table at run time; no data word holds it, so the plain pointer scan misses it (SA2's sub_829427B8: built at
-    0x82942810, the 2-minute recording stopped at its first call). Yields (value, address of the addi/ori)."""
+    0x82942810, the 2-minute recording stopped at its first call). katamari-nx: the window was 8 instructions and
+    missed sub_823700C8 (lis r9 at 0x8237068C, addi r3,r9,200 nine instructions later; the console stopped on its
+    first call). Yields (value, address of the addi/ori)."""
     for off in range(lo - IMAGE_BASE, hi - IMAGE_BASE - 3, 4):
         x = struct.unpack_from('>I', image, off)[0]
         if x >> 26 != 15 or (x >> 16) & 31:  # lis rX,imm is addis rX,0,imm
             continue
         rx, upper = (x >> 21) & 31, (x & 0xFFFF) << 16
-        for k in range(1, 9):
+        for k in range(1, 33):
             y = struct.unpack_from('>I', image, off + 4 * k)[0]
             op, rt, ra, imm = y >> 26, (y >> 21) & 31, (y >> 16) & 31, y & 0xFFFF
-            if op in (14, 24) and ra == rx:  # addi / ori from rX
-                value = (upper + (imm - 0x10000 if op == 14 and imm & 0x8000 else imm)) & 0xFFFFFFFF
-                yield value, IMAGE_BASE + off + 4 * k
-                if rt == rx:
-                    break
-                continue
+            # renut-ultimate (2026-11-20, port 191, found reading S4ep1-nx's tools/built_ptr_scan.py): addi rD,rA,SIMM
+            # reads rA (bits 11-15) and writes rD (bits 6-10), but ori rA,rS,UIMM reads rS (bits 6-10) and writes rA.
+            # The check took ori's destination for its source: `lis rX; ori rY,rX,lo` with rY != rX was never yielded
+            # (and the scan stopped there, taking the ori as a write of rX), and an ori writing rX from another register
+            # was yielded as a value it does not build.
+            if op in (14, 24):  # addi / ori
+                src, dst = (ra, rt) if op == 14 else (rt, ra)
+                if src == rx:
+                    value = (upper + (imm - 0x10000 if op == 14 and imm & 0x8000 else imm)) & 0xFFFFFFFF
+                    yield value, IMAGE_BASE + off + 4 * k
+                    if dst == rx:
+                        break
+                    continue
             if op == 18 or (op == 19 and (y >> 1) & 0x3FF in (16, 528)):  # b/bl/blr/bctr: end of the sequence
                 break
-            if rt == rx and op not in (36, 37, 38, 44, 45, 47, 54, 55):  # rX written (stores only read rt)
+            # port 191: the logical immediates (ori ... andis.) and the rotates (rlwimi, rlwinm, rlwnm, rld*) write rA
+            written = ra if op in (20, 21, 23, 24, 25, 26, 27, 28, 29, 30) else rt
+            if written == rx and op not in (36, 37, 38, 44, 45, 47, 54, 55):  # rX written (stores only read rt)
+                break
+            if op in (33, 35, 37, 39, 41, 43, 45, 49, 51, 53, 55) and ra == rx:  # an update form's base register
                 break
 
 
@@ -126,18 +149,25 @@ def pointer_candidates(image, gaps, lo, hi):
 
 
 def scratch_codegen(rexglue, d, candidates):
-    ov = open(OVERRIDES).read()
-    m = re.search(r'^\[functions\]\s*$', ov, re.M)
+    # katamari-nx: the scratch tree gets every [functions] entry of the real one (config/renut_funcs.toml and
+    # overrides.toml) plus the candidates, in one overrides.toml, and a manifest of its own (the real one includes
+    # renut_config.toml, whose codegen keys do not move function boundaries).
+    entries = []
+    for path in (os.path.join(APP, 'config', 'renut_funcs.toml'), OVERRIDES):
+        if os.path.exists(path):
+            text = open(path).read()
+            m = re.search(r'^\[functions\]\s*$', text, re.M)
+            if m:
+                entries.append(text[m.end():])
     body = ''.join(f'"0x{a:08X}" = {{ }}\n' for a in sorted(candidates))
-    open(os.path.join(d, 'overrides.toml'), 'w').write(ov[:m.end()] + '\n' + body + ov[m.end():])
-    # nights-nx: a manifest of its own (the game's xex and TU patch in app/assets; only the function list included).
-    xex = os.path.join(APP, 'assets', 'default.xex').replace('\\', '/')
+    open(os.path.join(d, 'overrides.toml'), 'w').write('[functions]\n' + body + '\n'.join(entries))
+    game = os.path.realpath(os.path.join(APP, 'assets')).replace('\\', '/')
     man = ('[project]\nsdk_version = "0.10.0"\nname = "renut"\n\n[entrypoint]\n'
-           f'file_path = "{xex}"\nout_directory_path = "gen"\nincludes = ["overrides.toml"]\n')
-    open(os.path.join(d, 'scratch_manifest.toml'), 'w').write(man)
+           f'file_path = "{game}/default.xex"\nout_directory_path = "gen"\nincludes = ["overrides.toml"]\n')
+    open(os.path.join(d, 'renut_manifest.toml'), 'w').write(man)
     log = os.path.join(d, 'codegen.log')
     with open(log, 'w') as f:
-        subprocess.run([rexglue, '--force', 'codegen', 'scratch_manifest.toml'], cwd=d, stdout=f,
+        subprocess.run([rexglue, '--force', 'codegen', 'renut_manifest.toml'], cwd=d, stdout=f,
                        stderr=subprocess.STDOUT)
     return os.path.join(d, 'gen'), log
 
@@ -225,12 +255,6 @@ def classify(gen, log, candidates):
         why = None
         if key in stubs or not ins:
             why = 'no code'
-        elif ins[0].replace(' ', '') == 'mrr8,r8':
-            # bejeweled3-nx (2026-10-21): `mr r8,r8` is MSVC's __try scope marker. SEH scope tables in .rdata
-            # ({count, begin, filter, handler, ...}) point at these labels inside their function; taking one for a
-            # function split sub_822EFCB8 (.pdata: 2,120 bytes) at 0x822F04CC, and its __finally funclet read a
-            # garbage frame (the first PC boot: a guest read of 0x60).
-            why = 'SEH scope label (mr r8,r8) inside a function'
         elif len(ins) * 4 > left and not shares_registered_tail(a, left, listing, starts):
             why = 'extends beyond its gap'
         elif any(i.split()[0] in bad_ops or i.startswith(('.long', 'invalid', 'unknown', 'illegal')) for i in ins):
@@ -287,6 +311,8 @@ def insert_in_functions(block):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # port 191: the dump tools/codegen.ps1 writes (REXGLUE_DUMP_IMAGE); default_image.bin was sa2-nx's name, which
+    # no tool here writes, so a run without --image stopped at the open.
     ap.add_argument('--image', default=os.path.join(ROOT, 'out', 'renut_image.bin'))
     ap.add_argument('--scratch', default=os.path.join(ROOT, 'out', 'ptrscan'))
     ap.add_argument('--dry-run', action='store_true', help='one pass, report only, do not touch overrides.toml')

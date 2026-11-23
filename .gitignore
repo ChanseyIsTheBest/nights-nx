@@ -41,9 +41,10 @@ tools/difftest/dp.*
 tools/difftest/shtool/obj/
 tools/difftest/shtool/bin/
 # 2026-10-21: the PGO profile (.gcda files merged from an instrumented run; tools/pgo_merge.py, docs/pgo-lto.md)
-pgo/
-*.xexp
-
-# nights-nx: packages (the NRO, the ELF, the generated code derived from the game)
-dist/package/
-out/pgo_streams/
+pgo/*
+*.stream
+# ...except the PGO profile of the released NRO (counts of which code ran, no game code or data)
+!pgo/*.gcda
+# 2026-11-11 (port 81): the in-place copies' form has a profile of its own (CMake BANJO_PGO_DIR_IN_PLACE), kept the same way
+pgo-inplace/*
+!pgo-inplace/*.gcda

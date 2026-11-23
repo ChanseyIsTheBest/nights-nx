@@ -433,7 +433,9 @@ __asm__(".text\n"
  * abort() and exit() use it too, see switch_crash_hooks.c. That is why ctx can be null: then there
  * are no registers, only the stack from 'stack'.
  */
-extern "C" void _start(void);
+// renut-ultimate (2026-11-12, port 89; sasrt-nx): a variable, as switch_code_blocks.cpp and guest_memory_switch.cpp
+// declare it: in one LTO link lto1 refuses a function and a variable of the same name. Only its address is used.
+extern "C" char _start;
 
 namespace {
 
@@ -521,6 +523,11 @@ void WriteCrashFile(const char* data, size_t len) {
 
 }  // namespace
 
+// blur-nx (2026-11-18): sdk/src/ui/switch_crash_hooks.c's (weak: an executable without the crash hooks has none).
+extern "C" __attribute__((weak)) const char* RexSwitchStderrRecent(size_t* len);
+
+extern "C" const char* RexAppBuildStamp(void);  // port 193: switch_crash_hooks.c (weak), app/src/build_stamp.cpp
+
 extern "C" void RexSwitchCrashLog(const char* reason, const ThreadExceptionDump* ctx,
                                   uint64_t stack, uint64_t pc) {
   // A second fault while the first is being written (on this thread or another)
@@ -543,6 +550,7 @@ extern "C" void RexSwitchCrashLog(const char* reason, const ThreadExceptionDump*
   svcGetThreadId(&tid, CUR_THREAD_HANDLE);
 
   Append(b, "==== %s ====\n", reason ? reason : "?");
+  Append(b, "%s\n", RexAppBuildStamp());  // port 193 (TFU-nx's): ties the report to its NRO and ELF
   Append(b, "thread %" PRIu64 ", image 0x%016" PRIx64 " (code up to 0x%016" PRIx64 ")\n", tid,
          base, text_hi);
   Append(b, "pc 0x%016" PRIx64 " = image+0x%" PRIx64 "\n", pc, pc - base);
@@ -594,6 +602,16 @@ extern "C" void RexSwitchCrashLog(const char* reason, const ThreadExceptionDump*
   ScanStack(b, ctx ? ctx->sp.x : stack, base, text_lo, text_hi);
   Append(b, "\n");
   WriteCrashFile(b.data, b.len);
+  // blur-nx (2026-11-18): with every log off, stderr is kept in memory (switch_crash_hooks.c): its last lines go into
+  // the crash report, the one file a release writes.
+  size_t recent_len = 0;
+  const char* recent = RexSwitchStderrRecent ? RexSwitchStderrRecent(&recent_len) : nullptr;
+  if (recent && recent_len) {
+    static const char kHead[] = "==== stderr before the crash (kept in memory: logging is off) ====\n";
+    WriteCrashFile(kHead, sizeof(kHead) - 1);
+    WriteCrashFile(recent, recent_len);
+    WriteCrashFile("\n", 1);
+  }
   // The log's last lines, which its writer thread had not put in the log file yet (log_file_writer).
   static char tail[12288];
   const size_t tail_len = RexLogUnwrittenTail(tail, sizeof(tail));

@@ -7,20 +7,20 @@
 // slot since the last time it checked.
 //
 // WHO WRITES MICROCODE THAT AN IM_LOAD READS (recompiled code, read instruction by instruction)
-//   - sub_825A3AF0 (the FlushState shaders) is the only one that writes IM_LOAD packets: the VS from [VS+40]
+//   - sub_82588808 (the FlushState shaders) is the only one that writes IM_LOAD packets: the VS from [VS+40]
 //     with [VS+600] bytes and the PS from [PS+12] with [PS+60] bytes, with the physical address from Fisica().
-//   - The constructors, already hooked in nfsmw_nativo_ganchos.cpp: sub_8259C038 (VS) allocates physical
-//     memory, copies the microcode from the container and leaves the address in [VS+40] (sub_8259BF68);
-//     sub_8259BC90 (PS) does the same, in [PS+12]. The memory of a freed shader can come back for another
+//   - The constructors, already hooked in nfsmw_nativo_ganchos.cpp: sub_82580F4C (VS) allocates physical
+//     memory, copies the microcode from the container and leaves the address in [VS+40] (sub_82580EA0);
+//     sub_82580B80 (PS) does the same, in [PS+12]. The memory of a freed shader can come back for another
 //     one at the same address: that is why they report.
 //   - The VS fetch patcher, sub_825A2FB8 (r3 device, r4 VS, r5 destination, r6 declaration), which writes
 //     12 bytes per fetch at r5 + 12 * index. It only has two call sites:
-//       * sub_825A3AF0, in place (r5 = [VS+40], return address 0x825A3C7C): when the declaration or the
+//       * sub_82588808, in place (r5 = [VS+40], return address 0x82588984): when the declaration or the
 //         strides change and the GPU has already passed the fence of that VS's last IM_LOAD ([VS+8] against
 //         the completed fence);
-//       * sub_825A37D8, on a copy of the VS in the ring itself that goes out as IM_LOAD_IMMEDIATE (r5 = the
-//         copy, return address 0x825A38D0): when the GPU has not passed that fence yet or outputs the PS does
-//         not read must be nulled (sub_825A36A8, also on the copy). It does not touch the memory of any
+//       * sub_82588498, on a copy of the VS in the ring itself that goes out as IM_LOAD_IMMEDIATE (r5 = the
+//         copy, return address 0x825885E8): when the GPU has not passed that fence yet or outputs the PS does
+//         not read must be nulled (sub_82588338, also on the copy). It does not touch the memory of any
 //         IM_LOAD.
 //   - Nobody else writes to the microcode of a live shader. If anything did, the ring's guard
 //     (CargarShaderCacheado) would catch it; and a call to the patcher that is neither of the two turns the
@@ -85,7 +85,7 @@ inline constexpr bool kCreacionesVigiladas = false;
 inline constexpr bool kCreacionesVigiladas = true;
 #endif
 
-// The physical address sub_825A3AF0 puts in the IM_LOAD from the object's virtual one (rlwinm
+// The physical address sub_82588808 puts in the IM_LOAD from the object's virtual one (rlwinm
 // r10,r28,12,20,31; addi r10,r10,512; rlwinm r10,r10,0,19,19; clrlwi r9,r28,3; add): the low 29 bits, plus
 // 4 KB from 0xE0000000.
 inline uint32_t Fisica(uint32_t direccion) {

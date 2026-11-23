@@ -1,13 +1,17 @@
 #include "shader.h"
+#include "container_0e.h"  // kameo-nx / feedingfrenzy-nx: version 0x0E containers
+#include "container_10.h"  // culdcept-nx: version 0x10 containers (XDK 2.0.3424)
 #include "shader_recompiler.h"
 #include "dxc_compiler.h"
 #ifdef RENUT_RECOMP
 #include "banjo_pred_select.h"
 #include "banjo_bool_spec.h"
 #include <atomic>
+#include <cstdlib>  // port 194: getenv
 // banjo-nx: rewritten shaders (BANJO_HLSL_OVERRIDE) that fell back to their own text.
 static std::atomic<size_t> banjoOverrideFallbacks{0};
 static std::atomic<size_t> banjoKillShaders{0}, banjoDepthShaders{0};  // banjo-nx (banjo_gpu_depth_only)
+static std::atomic<size_t> indexedLiteralShaders{0};  // vivapinata-nx: shaders reading a literal array of their own through a0 or aL
 #endif
 
 #include <mutex>
@@ -135,10 +139,74 @@ int main(int argc, char** argv)
                 auto shaderContainer = reinterpret_cast<const ShaderContainer*>(fileData.get() + i);
                 size_t dataSize = shaderContainer->virtualSize + shaderContainer->physicalSize;
 
+                // feedingfrenzy-nx (2026-10-26; kameo-nx's form): a version 0x0E container (XDK 2135, 2571) is keyed by its own hash
+                // and translated from its 0x11 form (container_0e.h).
+                if (container_0e::IsContainer0E(fileData.get() + i, fileSize - i))
+                {
+                    const uint8_t* original = fileData.get() + i;
+                    const size_t originalSize = size_t(container_0e::Rd(original, 4)) + container_0e::Rd(original, 8);
+                    XXH64_hash_t hash = XXH3_64bits(original, originalSize);
+                    auto shader = shaders.try_emplace(hash);
+                    if (shader.second)
+                    {
+                        std::vector<uint8_t> converted = container_0e::Convert(original);
+                        auto copy = std::make_unique<uint8_t[]>(converted.size());
+                        std::memcpy(copy.get(), converted.data(), converted.size());
+                        shader.first->second.data = copy.get();
+                        files.emplace_back(std::move(copy));
+#ifdef RENUT_RECOMP
+                        std::string stem = file.path().stem().string();
+                        if (containerIndex > 0)
+                            stem += fmt::format(".{}", containerIndex);
+                        shader.first->second.sourceName = std::move(stem);
+#endif
+                        foundAny = true;
+                    }
+#ifdef RENUT_RECOMP
+                    ++containerIndex;
+#endif
+                    i += originalSize;
+                    continue;
+                }
+                // culdcept-nx (2026-11-19): version 0x10 (XDK 2.0.3424's run-time compiler, Culdcept Saga): keyed by its own
+                // hash and translated from its 0x11 form (container_10.h: only the definition table differs).
+                if (container_10::IsContainer10(fileData.get() + i, fileSize - i))
+                {
+                    const uint8_t* original = fileData.get() + i;
+                    const size_t originalSize = size_t(container_10::Rd(original, 4)) + container_10::Rd(original, 8);
+                    XXH64_hash_t hash = XXH3_64bits(original, originalSize);
+                    auto shader = shaders.try_emplace(hash);
+                    if (shader.second)
+                    {
+                        std::vector<uint8_t> converted = container_10::Convert(original);
+                        auto copy = std::make_unique<uint8_t[]>(converted.size());
+                        std::memcpy(copy.get(), converted.data(), converted.size());
+                        shader.first->second.data = copy.get();
+                        files.emplace_back(std::move(copy));
+#ifdef RENUT_RECOMP
+                        std::string stem = file.path().stem().string();
+                        if (containerIndex > 0)
+                            stem += fmt::format(".{}", containerIndex);
+                        shader.first->second.sourceName = std::move(stem);
+#endif
+                        foundAny = true;
+                    }
+#ifdef RENUT_RECOMP
+                    ++containerIndex;
+#endif
+                    i += originalSize;
+                    continue;
+                }
+                // renut-ultimate (port 68, 2026-11-10, blur-nx): a vertex shader with two bindings (flags bit 0x20,
+                // which Renut's XGRegisterVertexShader hook reads as two slots) keeps the second binding's tables at
+                // 0x1C / 0x20. It was skipped here without a word, so it stayed "not in the shader cache" every run
+                // (Blur: about 1,000 run-time vertex shaders, container 0x102A1121). One microcode serves both
+                // bindings and Renut takes the input layout from the declaration: the first binding's tables
+                // translate it.
                 if ((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100 &&
                     dataSize <= (fileSize - i) &&
-                    shaderContainer->field1C == 0 &&
-                    shaderContainer->field20 == 0)
+                    ((shaderContainer->flags & 0x20) != 0 ||
+                     (shaderContainer->field1C == 0 && shaderContainer->field20 == 0)))
                 {
                     XXH64_hash_t hash = XXH3_64bits(shaderContainer, dataSize);
                     auto shader = shaders.try_emplace(hash);
@@ -189,6 +257,12 @@ int main(int argc, char** argv)
 
                 thread_local ShaderRecompiler recompiler;
                 recompiler = {};
+#ifdef RENUT_RECOMP
+                // renut-ultimate (from rr6-nx and vivapinata-nx, which listed the vertex shaders drawn with a plane): every vertex
+                // shader writes the user clip plane's distance; the draw gives a zero plane when it has none (render/draw.cpp
+                // UserClipPlane). The host geometry shaders pass it through (shaders/host/*_gs.hlsl), so every vertex shader has it.
+                recompiler.userClipPlane = true;
+#endif
                 recompiler.recompile(shader.data, include);
 
                 shader.specConstantsMask = recompiler.specConstantsMask;
@@ -200,7 +274,23 @@ int main(int argc, char** argv)
                 std::copy(std::begin(recompiler.floatConstants), std::end(recompiler.floatConstants),
                     std::begin(shader.floatConstants));
                 shader.cbufLiterals = recompiler.cbufLiterals;  // banjo-nx
+                if (!recompiler.indexedLiteralBases.empty())
+                {
+                    ++indexedLiteralShaders;
+                    std::string regs;
+                    for (const auto base : recompiler.indexedLiteralBases)
+                        regs += fmt::format(" c{}", base);
+                    fmt::print(stderr, "indexed literals {}_{:016X}: from{}\n", recompiler.isPixelShader ? "ps" : "vs", hash, regs);
+                }
                 shader.shaderFlags = recompiler.shaderFlags;    // banjo-nx (banjo_gpu_depth_only)
+                if (recompiler.hasCubeOp && !recompiler.hasCubeFetch)  // vivapinata-nx (2026-11-03)
+                    fmt::print(stderr, "{}\n", fmt::format("cube values {}_{:016X}", recompiler.isPixelShader ? "ps" : "vs", hash));
+                if (!recompiler.fetchFilterCensus.empty())  // vivapinata-nx (2026-11-03): one line a shader, all at once
+                    fmt::print(stderr, "{}\n", fmt::format("fetch filters {}_{:016X}:{}", recompiler.isPixelShader ? "ps" : "vs", hash,
+                        recompiler.fetchFilterCensus));
+                if (!recompiler.fetchLodCensus.empty())  // vivapinata-nx (2026-11-03)
+                    fmt::print(stderr, "{}\n", fmt::format("fetch lod {}_{:016X}:{}", recompiler.isPixelShader ? "ps" : "vs", hash,
+                        recompiler.fetchLodCensus));
                 if (recompiler.isPixelShader)
                 {
                     // banjo-nx (banjo_gpu_depth_only): the flags against the shader's own text (a kill is its only
@@ -356,7 +446,15 @@ int main(int argc, char** argv)
             fmt::println(stderr, "Recompile failures ({}):", g_failures.size());
             for (const auto& failure : g_failures)
                 fmt::println(stderr, "  hash=0x{:016X} reason={}", failure.hash, failure.reason);
-            return 2;
+            // renut-ultimate (2026-11-20, port 194; TFU-nx's of 2026-11-11, via S4ep1-nx): left out of the cache instead
+            // of failing the build (a game's packs give thousands of shaders, captured or dumped; one the translator
+            // cannot take stays out, and the renderer captures it again and logs it). BANJO_RECOMP_FAILURES_FATAL=1: the
+            // old behaviour, the build stops.
+            if (const char* fatal = std::getenv("BANJO_RECOMP_FAILURES_FATAL"); fatal && *fatal == '1')
+                return 2;
+            for (const auto& failure : g_failures)
+                shaders.erase(failure.hash);
+            fmt::println(stderr, "Those {} shaders are left out of the cache.", g_failures.size());
         }
 
 #ifdef RENUT_RECOMP
@@ -368,6 +466,8 @@ int main(int argc, char** argv)
                      banjoOverrideFallbacks.load());
         fmt::println("banjo-nx: {} pixel shaders kill pixels, {} write depth (banjo_gpu_depth_only keeps them)",
                      banjoKillShaders.load(), banjoDepthShaders.load());
+        fmt::println("vivapinata-nx: {} shaders read a literal array through a0 or aL: those literals go to the constant buffer",
+                     indexedLiteralShaders.load());
 #endif
         fmt::println("Creating shader cache...");
 
@@ -442,6 +542,35 @@ int main(int argc, char** argv)
         fmt::println("Compressing DXIL cache...");
 
         int level = ZSTD_maxCLevel();
+        // Port 194 (TFU-nx's of 2026-11-11): TFU's level packs gave about 13,000 shaders, and written as number lists the
+        // cache was a 400 MB source file. The compressed blobs go to files next to it and the source takes them with
+        // #embed (clang 19+, GCC 15+; the PC's clang 22 and devkitA64's GCC 16 here), unless BANJO_SHADER_CACHE_LIST=1.
+        // Level 19 for big caches (22 took minutes).
+        const bool listBlobs = [] {
+            const char* v = std::getenv("BANJO_SHADER_CACHE_LIST");
+            return v && *v == '1';
+        }();
+        if (shaders.size() > 4000)
+            level = 19;
+        auto embedBlob = [&](const std::vector<uint8_t>& blob, const char* suffix)
+        {
+            if (listBlobs)
+            {
+                for (auto data : blob)
+                    f.print("{},", data);
+                return;
+            }
+            std::string path = std::filesystem::absolute(std::string(output) + suffix).string();
+            for (auto& c : path)
+                if (c == '\\')
+                    c = '/';
+            writeAllBytes(path.c_str(), blob.data(), blob.size());
+            // clang takes #embed in C++ as an extension and says so (-Wc23-extensions): quiet there only.
+            f.print("\n#if defined(__clang__)\n#pragma clang diagnostic push\n"
+                    "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#endif\n");
+            f.print("#embed \"{}\"\n", path);
+            f.print("#if defined(__clang__)\n#pragma clang diagnostic pop\n#endif\n");
+        };
 
 #ifdef XENOS_RECOMP_DXIL
         std::vector<uint8_t> dxilCompressed(ZSTD_compressBound(dxil.size()));
@@ -449,8 +578,7 @@ int main(int argc, char** argv)
 
         f.print("const uint8_t g_compressedDxilCache[] = {{");
 
-        for (auto data : dxilCompressed)
-            f.print("{},", data);
+        embedBlob(dxilCompressed, ".dxil.zst");
 
         f.println("}};");
         f.println("const size_t g_dxilCacheCompressedSize = {};", dxilCompressed.size());
@@ -464,8 +592,7 @@ int main(int argc, char** argv)
 
         f.print("const uint8_t g_compressedSpirvCache[] = {{");
 
-        for (auto data : spirvCompressed)
-            f.print("{},", data);
+        embedBlob(spirvCompressed, ".spirv.zst");
 
         f.println("}};");
 

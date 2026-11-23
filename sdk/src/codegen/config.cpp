@@ -128,6 +128,30 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
             hasBool("fp_copy_only_functions"), "fp_copy_only_functions");
   MergeBool(cfg.dcbtPrefetch, toml["dcbt_prefetch"].value_or(false), hasBool("dcbt_prefetch"), "dcbt_prefetch");
   MergeBool(cfg.divInline, toml["div_inline"].value_or(false), hasBool("div_inline"), "div_inline");
+  MergeBool(cfg.vmxExactMinMax, toml["vmx_exact_minmax"].value_or(false), hasBool("vmx_exact_minmax"),
+            "vmx_exact_minmax");
+  MergeBool(cfg.vmxFusedMadd, toml["vmx_fused_madd"].value_or(false), hasBool("vmx_fused_madd"), "vmx_fused_madd");
+  MergeBool(cfg.vmxExpteRange, toml["vmx_expte_range"].value_or(false), hasBool("vmx_expte_range"),
+            "vmx_expte_range");
+  MergeBool(cfg.vmxCmpbNan, toml["vmx_cmpb_nan"].value_or(false), hasBool("vmx_cmpb_nan"), "vmx_cmpb_nan");
+  MergeBool(cfg.vmxDotOverflowQnan, toml["vmx_dot_overflow_qnan"].value_or(false), hasBool("vmx_dot_overflow_qnan"),
+            "vmx_dot_overflow_qnan");
+  // renut-ultimate (2026-11-16, port 144; tw2de_nx's): off by default.
+  MergeBool(cfg.vcmpbfpCr6Exact, toml["vcmpbfp_cr6_exact"].value_or(false), hasBool("vcmpbfp_cr6_exact"),
+            "vcmpbfp_cr6_exact");
+  MergeBool(cfg.vupkd3dExact, toml["vupkd3d_exact"].value_or(false), hasBool("vupkd3d_exact"), "vupkd3d_exact");
+  MergeBool(cfg.fpscrMovesExact, toml["fpscr_moves_exact"].value_or(false), hasBool("fpscr_moves_exact"),
+            "fpscr_moves_exact");
+  MergeBool(cfg.extraInstructions, toml["extra_instructions"].value_or(false), hasBool("extra_instructions"),
+            "extra_instructions");
+  MergeBool(cfg.spinHintYield, toml["spin_hint_yield"].value_or(false), hasBool("spin_hint_yield"),
+            "spin_hint_yield");  // port 144
+  MergeBool(cfg.vmx360Estimates, toml["vmx_360_estimates"].value_or(false), hasBool("vmx_360_estimates"),
+            "vmx_360_estimates");  // port 144
+  MergeBool(cfg.vmxDot360, toml["vmx_dot_360"].value_or(false), hasBool("vmx_dot_360"), "vmx_dot_360");  // port 144
+  MergeBool(cfg.exactFp, toml["exact_fp"].value_or(false), hasBool("exact_fp"), "exact_fp");  // port 144
+  MergeBool(cfg.exactFpLog, toml["exact_fp_log"].value_or(false), hasBool("exact_fp_log"), "exact_fp_log");
+  MergeBool(cfg.fpOriginLog, toml["fp_origin_log"].value_or(false), hasBool("fp_origin_log"), "fp_origin_log");
   MergeBool(cfg.skipMsr, toml["skip_msr"].value_or(false), hasBool("skip_msr"), "skip_msr");
   MergeBool(cfg.ctrAsLocalVariable, toml["ctr_as_local"].value_or(false), hasBool("ctr_as_local"),
             "ctr_as_local");
@@ -467,6 +491,16 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
         cfg.nonArgumentKeep.insert(static_cast<uint32_t>(*addr));
       else
         REXCODEGEN_ERROR("non_argument_as_local_keep: expected function addresses ({})", filePath);
+    }
+  }
+
+  // renut-ultimate (2026-11-16, port 144): exact_fp_functions -> exactFpFunctions (set), the functions that get exact_fp.
+  if (auto exactArray = toml["exact_fp_functions"].as_array()) {
+    for (auto& entry : *exactArray) {
+      if (auto addr = entry.value<int64_t>())
+        cfg.exactFpFunctions.insert(static_cast<uint32_t>(*addr));
+      else
+        REXCODEGEN_ERROR("exact_fp_functions: expected function addresses ({})", filePath);
     }
   }
 

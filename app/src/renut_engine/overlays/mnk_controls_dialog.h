@@ -11,6 +11,7 @@
 #include <rex/ui/keybinds.h>
 
 #include "imgui.h"
+#include "renut_engine/overlays/app_imgui.h"  // renut-ultimate (port 66)
 #include "renut_engine/mnk_controls.h"
 
 #include <cstddef>
@@ -38,6 +39,7 @@ class MnkControlsDialog : public rex::ui::ImGuiDialog {
     if (!visible_) {
       return;
     }
+    if (!AppImGuiReady()) return;  // renut-ultimate (port 66)
 
     // A rebind that was armed and then had the overlay closed under it would
     // leave the listener swallowing keys, so land any pending capture first.

@@ -604,6 +604,12 @@ class Memory {
   // Returns false if guest_address is outside every registered module range.
   bool SetFunction(uint32_t guest_address, PPCFunc* host_function);
   bool HasAnyFunctionTable() const;
+  // banjo-nx (2026-10-29): the lowest table base inside [address, address + size), 0 if none. A title update's
+  // image can be smaller than the base game's, whose image then covers the start of the table that follows the
+  // update's image (XexModule::ApplyPatch must not decommit it).
+  uint32_t FunctionTableBaseIn(uint32_t address, uint32_t size) const;
+  // banjo-nx (2026-10-29): the entry a table holds for guest_address (nullptr outside every table).
+  PPCFunc* TableFunction(uint32_t guest_address) const;
 
  private:
 #if REX_PLATFORM_MAC

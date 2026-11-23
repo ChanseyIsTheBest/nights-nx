@@ -117,6 +117,12 @@ struct BuilderContext {
   /// Get the recompiler configuration
   const RecompilerConfig& config() const;
 
+  /// renut-ultimate (2026-11-16, port 144; tw2de_nx's): exact_fp here (the option, or this function in
+  /// exact_fp_functions), and the two diagnostics (rex/codegen/config.h).
+  bool exact_fp() const;
+  bool exact_fp_log() const;
+  bool fp_origin_log() const;
+
   /// Get the function graph (single source of truth for function info)
   const FunctionGraph& graph() const;
 

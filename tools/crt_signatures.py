@@ -6,7 +6,7 @@ Every port finds the game's memcpy, memset, memmove, sin ... by hand before it c
 although games built with the same Xbox 360 SDK carry the same library code. This tool keeps what one port found as
 position-independent signatures and looks for them in any other game's image:
 
-  python tools/crt_signatures.py make --image out/renut_image.bin --gen app/generated/default
+  python tools/crt_signatures.py make --image out/default_image.bin --gen app/generated/default
                                       --list tools/crt_known_sa2.txt --db tools/crt_signatures.json --source sa2-nx
       adds the functions of the list (`<address> <name> [what it is]` lines) to the database. A function runs from
       its address to the next function of the generated tree (trailing padding dropped).
@@ -50,8 +50,6 @@ class Image:
             sys.exit('crt_signatures: %s is not a PE image dump' % path)
         sections, opt = struct.unpack_from('<H', d, pe + 6)[0], struct.unpack_from('<H', d, pe + 20)[0]
         self.base = struct.unpack_from('<I', d, pe + 24 + 28)[0]
-        if self.base < 0x80000000:  # zuma-nx: XDK 2135's PE header keeps 0x00400000; the XEX loads at 0x82000000
-            self.base = 0x82000000
         self.code = []  # (rva, size) of executable sections
         table = pe + 24 + opt
         for i in range(sections):

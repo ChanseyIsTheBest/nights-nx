@@ -28,8 +28,21 @@ FUENTES = [os.path.join(RAIZ, 'app', 'src'), os.path.join(RAIZ, 'sdk', 'src'),
            os.path.join(RAIZ, 'app', 'CMakeLists.txt')]
 
 
+def code_address_re(gen):
+    """renut-ultimate (2026-11-16, port 144; tw2de_nx's): the guest code addresses the hook sources name: 82xxxxxx, and
+    83xxxxxx too when the game's code runs there (its function table, <project>_init.cpp, has entries at 0x83000000 and
+    above: TW2's sub_833C2518 ...); a hook there was not seen, so its calls went past it. A tree without such entries
+    reads the sources as before (an 83xxxxxx number there is not a function)."""
+    import glob as _glob
+    for p in _glob.glob(os.path.join(gen, '*_init.cpp')):
+        if re.search(r'\{ 0x83[0-9A-Fa-f]{6},', open(p, encoding='utf-8', errors='ignore').read()):
+            return r'(?<![0-9A-Fa-f])(8[23][0-9A-Fa-f]{6})(?![0-9A-Fa-f])'
+    return r'(?<![0-9A-Fa-f])(82[0-9A-Fa-f]{6})(?![0-9A-Fa-f])'
+
+
 def enganchadas():
     nombres = set()
+    addr_re = code_address_re(GEN)  # port 144
     for raiz in FUENTES:
         if os.path.isfile(raiz):
             rutas = [raiz]
@@ -41,7 +54,7 @@ def enganchadas():
                 texto = open(ruta, encoding='utf-8', errors='ignore').read()
             except OSError:
                 continue
-            for m in re.findall(r'(?<![0-9A-Fa-f])(82[0-9A-Fa-f]{6})(?![0-9A-Fa-f])', texto):
+            for m in re.findall(addr_re, texto):
                 nombres.add('sub_' + m.upper())
     return nombres
 

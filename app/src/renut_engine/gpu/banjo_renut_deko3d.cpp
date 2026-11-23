@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <condition_variable>
 #include <mutex>
 #include <string_view>
 #include <unordered_map>
@@ -13,12 +14,64 @@
 #include <unistd.h>  // ftruncate (LoadCache)
 
 #include <fmt/format.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <zstd.h>
 
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/ultimate.h"
+#include "renut_engine/gpu/sasrt_gpu_round.h"  // sasrt-nx (2026-11-08)
 #include "renut_engine/gpu/guest/command_buffers.h"  // banjo-nx (2026-10-28): ReleaseSpareBuffersNow
 #include "renut_engine/gpu/shaders/shader_cache.h"  // banjo-nx (2026-10-22): the installed package's shader table
+
+// sasrt-nx (2026-11-08, the GPU round after the move to the ultimate base): defined on every platform so the tomls read
+// the same; only the deko3d back end counts.
+// Port 165 (from fnxf_xiii, its notes of 2026-10-25 and 10-29): plume_deko3d.h Deko3DOptions::swapInterval.
+REXCVAR_DEFINE_INT32(banjo_deko3d_swap_interval, 1, "Banjo/Enhancements",
+                     "deko3d: the display refreshes each image is held for with vsync on, 1-4 (fnxf_xiii's frame "
+                     "interval: 2 shows a 30 fps game evenly at 60 Hz, paced by the display itself). 1: as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Port 161 (from fnxf_xiii, its note of 2026-11-05): see DiagLogWriter.
+REXCVAR_DEFINE_BOOL(banjo_deko3d_log_writer, true, "Banjo/Enhancements",
+                    "deko3d.log's progress lines (memory blocks, compile threads, swapchain) written and flushed by a "
+                    "thread of their own instead of the thread that said them (failures still at once). false: every "
+                    "line written and flushed where it is said, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Port 161 (from fnxf_xiii, its note of 2026-10-30): plume_deko3d.h beforeBufferCopy. Off by default since port 250
+// (2026-11-21, blur-nx's console bisect: with it on, Blur's races drew rainbow colour fringes, its release NRO too;
+// docs/off-by-default.md section 1).
+// banjo-nx (2026-11-20, the rebase's console runs: 20,000 stages on the generic variant): plume's logMisses.
+REXCVAR_DEFINE_BOOL(banjo_deko3d_log_misses, false, "Banjo/Diagnostics",
+                    "deko3d renderer: every shader variant a draw got the generic one for (neither loaded nor in "
+                    "deko3d_shaders.bin) is logged once to deko3d.log as a \"run-time variant\" line, for "
+                    "tools/deko3d_variant_cache.py --runtime-log: the variants a cache made from the pipeline lists lacks")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_copy_run_barriers, false, "Banjo/Enhancements",
+                    "deko3d: no barrier between back-to-back buffer copies once a full one has run (the copy engine "
+                    "was taken to run them one at a time; each full barrier is 2 GPU submission entries). Off by "
+                    "default: with it on, Blur's console races drew rainbow colour fringes (port 250). "
+                    "false: a barrier before every copy, as before port 161")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_deko3d_diag_trace, false, "SASRT/Diagnostics",
+                    "deko3d renderer, a measurement (the second GPU round of 2026-11-08): every 600th frame's command "
+                    "stream logged as tokens ([deko3d trace] lines: barriers with their causes, draws, dispatches, target "
+                    "binds, clears, depth decompressions, copies), to find work that changes nothing");
+REXCVAR_DEFINE_BOOL(sasrt_deko3d_diag_barriers, false, "SASRT/Diagnostics",
+                    "deko3d renderer, a measurement: the barriers emitted counted by what they wait for and why (the "
+                    "layouts and stages of every call merged into them); the 10 s deko3d line then lists the commonest "
+                    "causes since the start");
+// renut-ultimate (2026-11-10, port 59, from LostOdysseyRecomp ff013164): descriptor writes. LostOdysseyRecomp writes a
+// descriptor set for every draw, and these two were about 3 % of its command thread; Renut writes a texture slot when a
+// texture, view or surface is made (a bindless table), so far fewer writes go through here.
+REXCVAR_DEFINE_BOOL(lo_deko3d_descriptor_cache, true, "Banjo/Enhancements",
+                    "deko3d renderer (from LostOdysseyRecomp): a sampled image descriptor is made once per texture view "
+                    "and copied at later writes of that view, instead of being made again every time. Same descriptors")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(lo_deko3d_relaxed_descriptor_counters, true, "Banjo/Enhancements",
+                    "deko3d renderer (from LostOdysseyRecomp): a descriptor write's count and epoch use relaxed atomic "
+                    "increments, so the write does not wait for its store into the uncached descriptor memory to drain. "
+                    "false: the ordered increments as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>
@@ -28,6 +81,8 @@
 // one, hence weak.
 extern const uint8_t g_deko3dGlslPackage[] __attribute__((weak));
 extern const size_t g_deko3dGlslPackageSize __attribute__((weak));
+
+REXCVAR_DECLARE(std::string, log_level);  // sdk/src/core/logging.cpp
 
 namespace banjo::renut_gpu::deko3d {
 
@@ -58,27 +113,60 @@ struct Package {
 };
 Package g_package;
 
+// renut-ultimate (port 62): whether the installer's package (version 2, OpenInstalled below) has the game shaders.
+bool InstalledPackageOk();
+
 Package &Open() {
   std::call_once(g_package.once, [] {
     Package &p = g_package;
-    if (&g_deko3dGlslPackageSize == nullptr || g_deko3dGlslPackageSize < sizeof(PackageHeader)) {
-      REXLOG_ERROR("[deko3d] this NRO has no GLSL package (tools/deko3d_shader_package.py): no game shaders");
+    // katamari-nx (2026-11-02, futari-nx's design): deko3d_glsl.bin beside the NRO first, read whole: a release NRO
+    // carries no game shader (BANJO_RENUT_RELEASE_SHADERS) and its shader table is built in, so this file is version 1,
+    // which the web installer makes from the player's game files. Held in memory: no card access while the game runs.
+    static std::vector<uint8_t> beside;
+    const uint8_t *base = nullptr;
+    size_t size = 0;
+    if (FILE *f = std::fopen(NextToExecutable("deko3d_glsl.bin").string().c_str(), "rb")) {
+      PackageHeader h{};
+      std::fseek(f, 0, SEEK_END);
+      const long length = std::ftell(f);
+      std::fseek(f, 0, SEEK_SET);
+      if (length >= long(sizeof(h)) && std::fread(&h, sizeof(h), 1, f) == 1 && h.version == 1) {
+        beside.resize(size_t(length));
+        std::fseek(f, 0, SEEK_SET);
+        if (std::fread(beside.data(), 1, beside.size(), f) == beside.size()) {
+          base = beside.data();
+          size = beside.size();
+        }
+      }
+      std::fclose(f);
+    }
+    if (!base && &g_deko3dGlslPackageSize != nullptr && g_deko3dGlslPackageSize >= sizeof(PackageHeader)) {
+      base = g_deko3dGlslPackage;
+      size = g_deko3dGlslPackageSize;
+    }
+    if (!base) {
+      // renut-ultimate (port 62, 2026-11-10): a release NRO (BANJO_RENUT_RELEASE_SHADERS) with the web installer's
+      // package beside it (version 2, read by OpenInstalled) has every game shader there: no version 1 package is
+      // then expected. Only a build with neither has no game shaders.
+      if (InstalledPackageOk())
+        REXLOG_INFO("[deko3d] no version 1 GLSL package: the installed package (version 2) has the game shaders");
+      else
+        REXLOG_ERROR("[deko3d] no GLSL package (deko3d_glsl.bin beside the NRO, or built in): no game shaders");
       return;
     }
-    p.header = reinterpret_cast<const PackageHeader *>(g_deko3dGlslPackage);
+    p.header = reinterpret_cast<const PackageHeader *>(base);
     if (std::memcmp(p.header->magic, "BDKG", 4) != 0 || p.header->version != 1) {
       REXLOG_ERROR("[deko3d] the GLSL package is not one this build reads");
       return;
     }
-    p.entries = reinterpret_cast<const PackageEntry *>(g_deko3dGlslPackage + p.header->tableOffset);
-    p.data = g_deko3dGlslPackage + p.header->dataOffset;
+    p.entries = reinterpret_cast<const PackageEntry *>(base + p.header->tableOffset);
+    p.data = base + p.header->dataOffset;
     // banjo-nx (2026-10-22): no dictionary in a distribution build's package (deko3d_shader_package.py --raw): its
     // frames are raw blocks, which the installer's page reads out of the NRO.
-    p.dict = p.header->dictSize ? ZSTD_createDDict(g_deko3dGlslPackage + sizeof(PackageHeader), p.header->dictSize)
-                                : nullptr;
+    p.dict = p.header->dictSize ? ZSTD_createDDict(base + sizeof(PackageHeader), p.header->dictSize) : nullptr;
     p.dctx = ZSTD_createDCtx();
     p.ok = (p.dict || !p.header->dictSize) && p.dctx;
-    REXLOG_INFO("[deko3d] GLSL package: {} shaders, {} KB in the NRO", p.header->count, g_deko3dGlslPackageSize >> 10);
+    REXLOG_INFO("[deko3d] GLSL package: {} shaders, {} KB", p.header->count, size >> 10);
   });
   return g_package;
 }
@@ -166,8 +254,13 @@ InstalledPackage &OpenInstalled() {
       p.inputs.clear();
       p.literals.clear();
     };
-    if (std::fseek(f, 0, SEEK_SET) != 0 || std::fread(&h, sizeof(h), 1, f) != 1 || std::memcmp(h.magic, "BDKG", 4) != 0 ||
-        h.version != 2)
+    if (std::fseek(f, 0, SEEK_SET) != 0 || std::fread(&h, sizeof(h), 1, f) != 1 || std::memcmp(h.magic, "BDKG", 4) != 0)
+      return fail("not a package");
+    if (h.version == 1) {  // katamari-nx (2026-11-02): the shaders alone, the table in the NRO: Open() reads it
+      std::fclose(f);
+      return;
+    }
+    if (h.version != 2)
       return fail("not a version 2 package");
     if (h.dictSize && (32ull + h.dictSize > h.tableOffset || h.dictSize > (4u << 20)))
       return fail("its dictionary is not sound");
@@ -217,6 +310,8 @@ InstalledPackage &OpenInstalled() {
   });
   return g_installed;
 }
+
+bool InstalledPackageOk() { return OpenInstalled().ok; }
 
 const PackageEntry *Find(InstalledPackage &p, uint64_t hash) {
   if (!p.ok)
@@ -336,71 +431,186 @@ bool InstalledShaderTable(std::vector<ShaderCacheEntry> &entries, std::vector<Sh
 
 #if defined(PLUME_DEKO3D)
 
-std::unique_ptr<plume::RenderShader> CreateGameShader(plume::RenderDevice *device, uint64_t hash) {
-  // The installer's package first (made from the player's files), then the NRO's own.
+// banjo-nx (2026-11-01): a shader's GLSL from the package that has it, the installer's first (empty: in neither, or it did
+// not unpack). in_memory: that package is in memory (unpacking it again later reads no card).
+static std::string UnpackGlsl(uint64_t hash, uint32_t &stage, bool &in_memory) {
   InstalledPackage &f = OpenInstalled();
   Package &p = Open();
   const PackageEntry *installed = Find(f, hash);
   const PackageEntry *e = installed ? installed : Find(p, hash);
-  if (!e || !device) {
+  in_memory = false;
+  if (!e) {
     static int logged = 0;
     if ((f.ok || p.ok) && logged++ < 16)
       REXLOG_ERROR("[deko3d] shader {:016X} is in no GLSL package", hash);
-    return nullptr;
+    return {};
   }
-  std::vector<uint8_t> blob(sizeof(plume::Deko3DShaderBlob) + e->size);
-  plume::Deko3DShaderBlob header;
-  header.stage = e->stage;
-  header.glslSize = e->size;
-  header.dkshSize = 0;
-  std::memcpy(blob.data(), &header, sizeof(header));
+  stage = e->stage;
+  std::string text(e->size, '\0');
   if (installed && f.ddict) {
     // banjo-nx (2026-10-23): from memory (a package with a dictionary).
     std::lock_guard<std::mutex> lock(f.mutex);
-    const size_t n = ZSTD_decompress_usingDDict(f.dctx, blob.data() + sizeof(header), e->size, f.data.data() + e->offset,
+    const size_t n = ZSTD_decompress_usingDDict(f.dctx, text.data(), e->size, f.data.data() + e->offset,
                                                 e->compressedSize, f.ddict);
     if (ZSTD_isError(n) || n != e->size) {
       REXLOG_ERROR("[deko3d] shader {:016X}: the installed GLSL did not unpack ({})", hash,
                    ZSTD_isError(n) ? ZSTD_getErrorName(n) : "short");
-      return nullptr;
+      return {};
     }
+    in_memory = true;
   } else if (installed) {
     std::lock_guard<std::mutex> lock(f.mutex);
     std::vector<uint8_t> frame(e->compressedSize);
     const bool read = std::fseek(f.file, long(f.data_offset + e->offset), SEEK_SET) == 0 &&
                       std::fread(frame.data(), 1, frame.size(), f.file) == frame.size();
-    const size_t n = read ? ZSTD_decompressDCtx(f.dctx, blob.data() + sizeof(header), e->size, frame.data(), frame.size())
-                          : 0;
+    const size_t n = read ? ZSTD_decompressDCtx(f.dctx, text.data(), e->size, frame.data(), frame.size()) : 0;
     if (!read || ZSTD_isError(n) || n != e->size) {
       REXLOG_ERROR("[deko3d] shader {:016X}: the installed GLSL did not read ({})", hash,
                    !read ? "card" : ZSTD_isError(n) ? ZSTD_getErrorName(n) : "short");
-      return nullptr;
+      return {};
     }
   } else {
     std::lock_guard<std::mutex> lock(p.mutex);
-    const size_t n = p.dict ? ZSTD_decompress_usingDDict(p.dctx, blob.data() + sizeof(header), e->size,
-                                                         p.data + e->offset, e->compressedSize, p.dict)
-                            : ZSTD_decompressDCtx(p.dctx, blob.data() + sizeof(header), e->size, p.data + e->offset,
-                                                  e->compressedSize);
+    const size_t n = p.dict ? ZSTD_decompress_usingDDict(p.dctx, text.data(), e->size, p.data + e->offset,
+                                                         e->compressedSize, p.dict)
+                            : ZSTD_decompressDCtx(p.dctx, text.data(), e->size, p.data + e->offset, e->compressedSize);
     if (ZSTD_isError(n) || n != e->size) {
       REXLOG_ERROR("[deko3d] shader {:016X}: the GLSL did not unpack ({})", hash,
                    ZSTD_isError(n) ? ZSTD_getErrorName(n) : "short");
-      return nullptr;
+      return {};
+    }
+    in_memory = true;
+  }
+  return text;
+}
+
+std::unique_ptr<plume::RenderShader> CreateGameShader(plume::RenderDevice *device, uint64_t hash) {
+  // The installer's package first (made from the player's files), then the NRO's own.
+  if (!device)
+    return nullptr;
+  uint32_t stage = 0;
+  bool in_memory = false;
+  const std::string glsl = UnpackGlsl(hash, stage, in_memory);
+  if (glsl.empty())
+    return nullptr;
+  std::vector<uint8_t> blob(sizeof(plume::Deko3DShaderBlob) + glsl.size());
+  plume::Deko3DShaderBlob header;
+  header.stage = stage;
+  header.glslSize = uint32_t(glsl.size());
+  header.dkshSize = 0;
+  std::memcpy(blob.data(), &header, sizeof(header));
+  std::memcpy(blob.data() + sizeof(header), glsl.data(), glsl.size());
+  auto shader = device->createShader(blob.data(), blob.size(), "main", plume::RenderShaderFormat::DEKO3D);
+  if (shader) {
+    shader->setName(fmt::format("{}_{:016X}", stage == 4 ? "ps" : "vs", hash));
+    // banjo-nx (2026-11-01, the console's out-of-memory crash): the text is not kept with the shader; plume unpacks it
+    // again when a new variant needs it (plume::Deko3DGlslSource). A package read from the card keeps it, as before.
+    if (in_memory) {
+      plume::Deko3DShaderSetGlslLoader(shader.get(), [hash] {
+        uint32_t st = 0;
+        bool mem = false;
+        return UnpackGlsl(hash, st, mem);
+      });
     }
   }
-  auto shader = device->createShader(blob.data(), blob.size(), "main", plume::RenderShaderFormat::DEKO3D);
-  if (shader)
-    shader->setName(fmt::format("{}_{:016X}", e->stage == 4 ? "ps" : "vs", hash));
   return shader;
+}
+
+// Port 161 (from fnxf_xiii, its note of 2026-11-05; banjo_deko3d_log_writer): deko3d.log's writer. The back end's
+// progress lines (its memory blocks, the compile threads, the swapchain, the first presents) are queued and written and
+// flushed by a thread of their own: each line was a write and a flush of the card on the thread that said it, the
+// render thread's for the "memory block" lines of an area's new buffers (fnxf_xiii: 16 ms of such writes in one
+// frame). Any other line (a failure, a guard, a fence that does not signal) is written and flushed at once on its own
+// thread, after the queued ones, so a crash right after it still has it in the file.
+class DiagLogWriter {
+ public:
+  static DiagLogWriter &Instance() {
+    static DiagLogWriter w;
+    return w;
+  }
+  void Open(FILE *file) { file_ = file; }
+  void Queue(const char *line) {
+    bool start = false;
+    {
+      std::lock_guard lock(queue_mutex_);
+      queue_.emplace_back(line);
+      start = !started_;
+      started_ = true;
+    }
+    if (start)
+      banjo::renut_gpu::StartLongLivedThread([] { Instance().Loop(); }, 32 * 1024);
+    cv_.notify_one();
+  }
+  void WriteNow(const char *line) {
+    std::vector<std::string> lines;
+    {
+      std::lock_guard lock(queue_mutex_);
+      lines.swap(queue_);
+    }
+    std::lock_guard lock(file_mutex_);
+    if (!file_)
+      return;
+    for (const std::string &l : lines)
+      std::fprintf(file_, "%s\n", l.c_str());
+    std::fprintf(file_, "%s\n", line);
+    std::fflush(file_);
+  }
+
+ private:
+  void Loop() {
+    for (;;) {
+      std::vector<std::string> lines;
+      {
+        std::unique_lock lock(queue_mutex_);
+        cv_.wait(lock, [this] { return !queue_.empty(); });
+        lines.swap(queue_);
+      }
+      std::lock_guard lock(file_mutex_);
+      if (!file_)
+        continue;
+      for (const std::string &l : lines)
+        std::fprintf(file_, "%s\n", l.c_str());
+      std::fflush(file_);
+    }
+  }
+  std::mutex queue_mutex_, file_mutex_;
+  std::condition_variable cv_;
+  std::vector<std::string> queue_;
+  bool started_ = false;
+  FILE *file_ = nullptr;
+};
+
+bool Deko3DProgressLine(const char *message) {
+  static constexpr const char *kProgress[] = {
+      "device: creating", "image heap:", "buffer arena:", "device ready:", "memory block:", "blocks:", "uam thread:",
+      "uam: compile", "uam: run-time variant", "uam background thread:", "uam queue:", "shader code: block",
+      "trace ", "self-test", "swapchain:", "present ", "nvservices: a GPU submission",
+  };
+  for (const char *prefix : kProgress)
+    if (std::strncmp(message, prefix, std::strlen(prefix)) == 0)
+      return true;
+  return false;
 }
 
 void InstallShaderCache() {
   // The back end's messages into this log (plume writes them to stderr otherwise), and into deko3d.log next to the NRO,
-  // flushed at each line: the log's buffer is lost when the process dies.
-  static FILE *diag = std::fopen(NextToExecutable("deko3d.log").string().c_str(), "w");
+  // flushed at each line: the log's buffer is lost when the process dies. katamari-nx (2026-11-02): not with
+  // log_level "off" (the user's PGO build: only the crash logs).
+  static FILE *diag = REXCVAR_GET(log_level) == "off"
+                          ? nullptr
+                          : std::fopen(NextToExecutable("deko3d.log").string().c_str(), "w");
   static std::mutex diag_mutex;
+  static const bool writer = REXCVAR_GET(banjo_deko3d_log_writer);  // port 161
+  DiagLogWriter::Instance().Open(diag);
   plume::SetDeko3DLogCallback([](const char *message) {
     REXLOG_INFO("[deko3d] {}", message);
+    if (writer) {  // port 161: see DiagLogWriter
+      if (Deko3DProgressLine(message))
+        DiagLogWriter::Instance().Queue(message);
+      else
+        DiagLogWriter::Instance().WriteNow(message);
+      return;
+    }
     std::lock_guard<std::mutex> lock(diag_mutex);
     if (diag) {
       std::fprintf(diag, "%s\n", message);
@@ -411,18 +621,32 @@ void InstallShaderCache() {
   plume::Deko3DOptions options;
   options.depthCompression = Deko3DDepthCompressionOn();
   options.zcull = Deko3DZcullOn();
+  options.msaaPositions = Deko3DMsaaPositionsOn();  // 2026-10-30, from sasrt-nx
+  options.alphaToCoverageDither = Deko3DA2cDitherOn();
+  options.stripRestart = Deko3DStripRestartOn();
   options.vsOutputs = Deko3DVsOutputsOn();
   options.uamFlags = Deko3DUamFlags();
+  options.logMisses = REXCVAR_GET(banjo_deko3d_log_misses);  // banjo-nx (2026-11-20)
   options.mergeBarriers = Deko3DBarrierMergeOn();  // banjo-nx (2026-10-19, GPU)
   options.leanBarriers = Deko3DBarrierLeanOn();
+  options.copyRunBarriers = REXCVAR_GET(banjo_deko3d_copy_run_barriers);  // port 161 (from fnxf_xiii)
+  options.swapInterval = uint32_t(std::clamp<int32_t>(REXCVAR_GET(banjo_deko3d_swap_interval), 1, 4));  // port 165
   options.asyncVariants = Deko3DAsyncVariantsOn();  // banjo-nx (2026-10-21)
   // The uam thread on the background compile core, below the game's threads (2026-10-18).
   options.compileCore = Deko3DCompileCore();
   options.compilePriority = Deko3DCompilePriority();
   options.backgroundCompileShare = Deko3DBackgroundCompileShare();  // 2026-10-23
   options.compileWaitBoost = Deko3DCompileWaitBoostOn();  // 2026-10-23
+  options.fastFirstCompile = Deko3DFastFirstCompileOn();  // port 56 (mk9-nx)
   options.asyncCacheReads = Deko3DAsyncCacheReadsOn();     // 2026-10-23
+  options.userClipEnable = Deko3DUserClipEnable();  // renut-ultimate, from rr6-nx (2026-11-05)
+  options.depthResolve = Deko3DDepthResolveOn();  // sasrt-nx (2026-10-21)
+  options.depthResolveLazy = Deko3DDepthResolveLazyOn();  // renut-ultimate (2026-11-08)
+  options.diagBarriers = REXCVAR_GET(sasrt_deko3d_diag_barriers);  // sasrt-nx (2026-11-08)
+  options.descriptorCache = REXCVAR_GET(lo_deko3d_descriptor_cache);                       // port 59
+  options.relaxedDescriptorCounters = REXCVAR_GET(lo_deko3d_relaxed_descriptor_counters);  // port 59
   plume::Deko3DSetOptions(options);
+  sasrt::gpu_round::ApplyPlume();  // sasrt-nx (2026-11-08): the GPU round's items in plume (preciseDepthResolve)
   // banjo-nx (2026-10-28, the console's OOM): a block that finds no room in the heap gets the spare command buffers'.
   plume::Deko3DSetMemoryPressureCallback(+[] { ::renut::gpu::ReleaseSpareBuffersNow(); });
   plume::Deko3DSetGpuRegion(Deko3DGpuRegionOn());  // banjo-nx (2026-10-28, h10)
@@ -488,10 +712,70 @@ void InstallShaderCache() {
       });
 }
 
+// sasrt-nx (2026-11-08, sasrt_deko3d_diag_trace): one frame's command stream every 600 frames.
+void TraceFrameBoundary() {
+  static const bool on = REXCVAR_GET(sasrt_deko3d_diag_trace);
+  if (!on)
+    return;
+  static uint64_t frame = 0;
+  ++frame;
+  if (plume::g_deko3dTrace) {
+    plume::g_deko3dTrace = false;
+    const std::string text = plume::Deko3DTraceTake();
+    REXLOG_INFO("[deko3d trace] frame {} ({} characters; B barrier P/F/X + causes r read c copy C colour d depth o other "
+                "b buffer k compute m merged + i texture cache, D draw, X dispatch, T colour:depth bind, Cc/Cd clear, Z "
+                "depth decompression, K copy engine, I descriptor invalidation, E list end):",
+                frame - 1, text.size());
+    for (size_t at = 0; at < text.size(); at += 3000)
+      REXLOG_INFO("[deko3d trace] {}", text.substr(at, 3000));
+  } else if (frame % 600 == 0) {
+    plume::Deko3DTraceTake();  // (empty)
+    plume::g_deko3dTrace = true;
+  }
+}
+
+// sasrt-nx (2026-11-08, sasrt_deko3d_diag_barriers): the commonest barrier causes so far.
+std::string BarrierCauses() {
+  if (!REXCVAR_GET(sasrt_deko3d_diag_barriers))
+    return {};
+  const plume::Deko3DStats &st = plume::GetDeko3DStats();
+  std::vector<std::pair<uint64_t, uint32_t>> all;
+  for (uint32_t m = 0; m < 3; ++m)
+    for (uint32_t w = 0; w < 256; ++w)
+      if (const uint64_t n = st.barrierWhy[m][w].load(std::memory_order_relaxed))
+        all.emplace_back(n, (m << 8) | w);
+  std::sort(all.rbegin(), all.rend());
+  static const char *const kModes[3] = {"primitives", "fragments", "full"};
+  static const char *const kWhy[8] = {"read", "copy", "colour", "depth", "other", "buffer", "compute", "merged"};
+  std::string text = "; barrier causes (sasrt_deko3d_diag_barriers):";
+  for (size_t i = 0; i < all.size() && i < 16; ++i) {
+    text += fmt::format(" {} {}", all[i].first, kModes[all[i].second >> 8]);
+    const uint32_t w = all[i].second & 255;
+    if (!w)
+      text += " (none)";
+    for (uint32_t b = 0; b < 8; ++b)
+      if ((w >> b) & 1)
+        text += fmt::format("{}{}", (w & ((1u << b) - 1)) ? "+" : " ", kWhy[b]);
+    text += ',';
+  }
+  // sasrt-nx (2026-11-08, the second GPU round's census).
+  auto n = [](const std::atomic<uint64_t> &c) { return c.load(std::memory_order_relaxed); };
+  text += fmt::format(" census: {} descriptor invalidations, {} code invalidations, {} framebuffer binds ({} depth "
+                      "target changes), {} lists, {} dispatches, {} clears",
+                      n(st.diagDescInvalidates), n(st.diagCodeInvalidates), n(st.diagFramebufferBinds),
+                      n(st.diagDepthChanges), n(st.diagListEnds), n(st.diagDispatches), n(st.diagClears));
+  return text;
+}
+
+std::string ReportBody(const plume::Deko3DStats &st, uint64_t compiles);
+
 std::string Report() {
   const plume::Deko3DStats &st = plume::GetDeko3DStats();
-  const uint64_t compiles = st.shaderCompiles;
-  return fmt::format("deko3d: {} draws ({} through the address window), {} pipeline binds ({} state binds), bound "
+  return ReportBody(st, st.shaderCompiles) + BarrierCauses();
+}
+
+std::string ReportBody(const plume::Deko3DStats &st, uint64_t compiles) {
+  std::string r = fmt::format("deko3d: {} draws ({} through the address window), {} pipeline binds ({} state binds), bound "
                      "textures {} read, {} skipped (A/B 39); uam {} compiles (avg {:.0f} ms, {} failed; "
                      "{} stages given the generic variant meanwhile, {} compiled and {} read from the cache in the background, {} "
                      "swapped in; blocking: {} a draw "
@@ -499,7 +783,7 @@ std::string Report() {
                      "background rests {:.1f} s), "
                      "DKSH cache {} hits, {} added; memory: images {} MB, buffers {} MB, code {} KB, commands {} KB; "
                      "barriers: {} primitives, {} fragments, {} full ({} invalidating textures); copy and 2D engines: {} "
-                     "buffer copies, {} texture uploads, {} readbacks, {} image copies, {} resolves, {} blits",
+                     "buffer copies, {} texture uploads, {} readbacks, {} image copies, {} resolves, {} blits; multisampled pipelines {} ({} with alpha to coverage, {} given the standard sample positions: banjo_deko3d_msaa_positions); indexed strips drawn with primitive restart {} (banjo_deko3d_strip_restart); compiles a draw waited for made in one pass {} (banjo_deko3d_fast_first_compile)",
                      st.draws.load(), st.windowDraws.load(), st.pipelineBinds.load(), st.stateBinds.load(),
                      st.textureRuns.load(), st.textureSkips.load(), compiles,
                      compiles ? double(st.shaderCompileNs.load()) / 1e6 / double(compiles) : 0.0,
@@ -511,7 +795,18 @@ std::string Report() {
                      st.bufferBytes.load() >> 20, st.codeBytes.load() >> 10, st.commandBytes.load() >> 10,
                      st.barriersPrimitives.load(), st.barriersFragments.load(), st.barriersFull.load(),
                      st.barriersImageInvalidate.load(), st.copyBuffer.load(), st.copyUpload.load(), st.copyReadback.load(),
-                     st.copyImage.load(), st.copyResolve.load(), st.copyBlit.load());
+                     st.copyImage.load(), st.copyResolve.load(), st.copyBlit.load(), st.msaaPipelines.load(),
+                     st.msaaAlphaToCoverage.load(), st.msaaPositioned.load(), st.stripRestartDraws.load(),
+                     st.fastCompiles.load());
+  // renut-ultimate (2026-11-08): the depth decompresses (sasrt_deko3d_depth_resolve, ultimate_deko3d_depth_resolve_lazy).
+  if (Deko3DDepthResolveOn())
+    r += fmt::format("; depth decompresses (sasrt_deko3d_depth_resolve): {} where the target was bound, {} left for "
+                     "later, {} done later for a read", st.depthResolvesBound.load(), st.depthResolvesDeferred.load(),
+                     st.depthResolvesLater.load());
+  // renut-ultimate (2026-11-10, port 59): descriptor writes and the ones lo_deko3d_descriptor_cache served.
+  r += fmt::format("; descriptor writes {} ({} from the cache: lo_deko3d_descriptor_cache)", st.descriptorWrites.load(),
+                   st.descriptorCacheHits.load());
+  return r;
 }
 
 #else

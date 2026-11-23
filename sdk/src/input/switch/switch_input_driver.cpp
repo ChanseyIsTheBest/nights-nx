@@ -12,11 +12,16 @@
 #include <array>
 #include <bit>
 #include <cctype>
+#include <cmath>  // port 195: input_stick_deadzone
+#include <chrono>  // sasrt-nx (2026-11-03, input_switch_disconnect_grace_ms; port 52)
 #include <cstdio>
 #include <cstring>
 #include <vector>
 #include <string>
 #include <tuple>
+#include <atomic>
+#include <condition_variable>  // blur-nx (2026-11-17, audit #6): the rumble thread
+#include <mutex>
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
@@ -35,15 +40,16 @@
 // Face buttons. By position (the default since 2026-10-07, the user's choice): as on the Xbox 360 pad the game was
 // made for, the bottom button (B on Switch controllers) acts as A, the right one (A) as B, the left one (Y) as X and
 // the top one (X) as Y. false = by letter (the Switch's A acts as A), as in other Switch games. It applies at once;
-// the settings menu reads it too (window_switch.cpp). input_p1_* / input_p2_* below override single buttons.
+// the settings menu reads it too (window_switch.cpp). input_p1_* ... input_p4_* below override single buttons.
 REXCVAR_DEFINE_BOOL(input_xbox_layout, true, "Input",
                     "Face buttons by position, as on an Xbox 360 pad (the bottom button, B, acts as A). "
                     "false = by letter: the Switch's A acts as A");
 
 // Remapping, per player: which Switch buttons press each Xbox 360 button, read at start (renut.toml sections
-// [input_p1] and [input_p2]: a = "B, ZR" there is input_p1_a). Empty = the default (the layout above for A/B/X/Y; for
+// [input_p1] to [input_p4]: a = "B, ZR" there is input_p1_a). Empty = the default (the layout above for A/B/X/Y; for
 // the rest, the button in the same place). A comma-separated list of: A B X Y L R ZL ZR PLUS MINUS LSTICK RSTICK UP
-// DOWN LEFT RIGHT SL SR, or NONE. Player 1's map also serves players 3 and 4. Single Joy-Cons held sideways name their
+// DOWN LEFT RIGHT SL SR, or NONE. Players 3 and 4 have their own maps (port 55, from feedingfrenzy2-nx's SDK, which
+// had them from peggle2-nx; before, player 1's map served them). Single Joy-Cons held sideways name their
 // four face buttons by the place they take there (the right one is A, the bottom one B, the top one X, the left one Y),
 // as two-handed controllers do.
 #define REX_INPUT_MAP_CVARS(P, WHO)                                                                                 \
@@ -65,24 +71,48 @@ REXCVAR_DEFINE_BOOL(input_xbox_layout, true, "Input",
   REXCVAR_DEFINE_STRING(input_##P##_right, "", "Input", WHO ": Switch buttons for D-pad right (default RIGHT)")
 REX_INPUT_MAP_CVARS(p1, "Player 1");
 REX_INPUT_MAP_CVARS(p2, "Player 2");
+REX_INPUT_MAP_CVARS(p3, "Player 3");
+REX_INPUT_MAP_CVARS(p4, "Player 4");
 #undef REX_INPUT_MAP_CVARS
 
-// Single Joy-Cons (one per player, for multiplayer) are held sideways: the system is told so (for its own menus,
-// the applets), the four buttons under the player's right thumb become the face buttons and the stick is turned for
-// the grip (input_joycon_sideways_stick). SL and SR are the triggers (ZL / ZR), the minus or plus button is Start, the
-// stick is the left stick. false = held upright (the system's default; no remapping).
+// blur-nx (2026-11-18, the user: "add an option to the config please exposed to the user to change the button config
+// combo to open the menu"): the game menu's buttons (DispatchMenuShortcuts), and the gate in Poll follows them.
+REXCVAR_DEFINE_STRING(input_menu_combo, "A+B+X+Y+L+R", "Input",
+                      "The Switch buttons that open the game menu, held together: two or more of A B X Y L R ZL ZR PLUS "
+                      "MINUS LSTICK RSTICK UP DOWN LEFT RIGHT SL SR, joined by + (for example \"L+R+MINUS\"). A name "
+                      "not known, or a single button, keeps A+B+X+Y+L+R. While two or more of its L, R, ZL and ZR are "
+                      "held, its other buttons do not reach the game");
+
+// Single Joy-Cons (one per player, for multiplayer) are held sideways: the system is told so (it then turns the
+// stick for that grip), and the four buttons under the player's right thumb become the face buttons. SL and SR are
+// the triggers (ZL / ZR), the minus or plus button is Start, the stick is the left
+// stick. false = held upright (the system's default; no remapping).
+// blur-nx (2026-11-18, the game menu): both apply at once (Poll reads them; the hold type is told again on a change).
 REXCVAR_DEFINE_BOOL(input_joycon_sideways, true, "Input",
                     "Single Joy-Cons are held sideways, one per player (face buttons, stick and SL/SR turned "
-                    "accordingly)")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-// nights-nx (2026-10-29, sa2-nx's 2026-10-28 fix, from peggle2-nx 1.0.2 and guwange-nx): the horizontal hold type turns
-// the buttons' meaning for the system's own menus, but padGetStickPos still gives the stick as the Joy-Con is built
-// (up = towards its L / R button): held sideways a push to the right read as up. The stick is turned a quarter here.
+                    "accordingly)");
+// futari-nx (2026-10-22, guwange-nx's fix): the horizontal hold type turns the buttons' meaning for the system's own
+// menus, but padGetStickPos still gives the stick as the Joy-Con is built (up = towards its L / R button). The stick
+// is turned a quarter here.
 REXCVAR_DEFINE_BOOL(input_joycon_sideways_stick, true, "Input",
                     "With input_joycon_sideways: a single Joy-Con's stick turned a quarter for the sideways grip (left "
                     "Joy-Con: its top points left; right Joy-Con: its top points right); false = as the Joy-Con "
-                    "reports it")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+                    "reports it");
+// sasrt-nx (2026-11-03; port 52): a pad HID reports absent for a moment (a Bluetooth hiccup, a style change) reached the
+// game as a disconnect at once, and Sonic Transformed stops a race for it about once a race; shipped games wait before
+// they say so.
+// renut-ultimate (2026-11-20, port 195): S4ep1-nx's of 2026-11-15 (github.com/FurryLilManChild/S4ep1-nx, GPL-3.0). The
+// driver passes the sticks through raw and the game applies its own dead zone; this adds one on top for worn sticks that
+// drift. Radial, rescaled so full tilt stays full. Read live. 0 (the default): the game's own only, as before.
+REXCVAR_DEFINE_INT32(input_stick_deadzone, 0, "Input",
+                     "The Switch's controllers: an extra stick dead zone in percent of full tilt (0 = none, the "
+                     "game's own only; 10 or 20 for drifting sticks). Radial, rescaled so full tilt stays full")
+    .range(0, 50);
+REXCVAR_DEFINE_INT32(input_switch_disconnect_grace_ms, 1000, "Input",
+                     "A controller HID reports as not connected is kept, with its last state, for this long before "
+                     "the game is told it is gone (a Bluetooth hiccup or a layout change clears in well under a "
+                     "second); a controller that connects meanwhile (the handheld's Joy-Cons taken off, a new pad) ends "
+                     "it at once. 0: reported at once, as before");
 
 // Route recording for unattended test runs: the game's own pad input, written and played back here.
 // MINUS on pad 1 marks the start (and, while recording, the end), so the load time before the route does not
@@ -110,18 +140,20 @@ constexpr uint32_t kRepeatRateMs = 100;
 // counter, so a pad that reconnects never gets an id it had before.
 constexpr uint64_t kDeviceIdTag = 0x4E5800;  // "NX"
 
-// Which Switch buttons press each Xbox 360 button: per player (1, and 2; players 3-4 use player 1's), one table per
-// face-button layout (input_xbox_layout), that player's overrides (input_p1_* / input_p2_*) applied to both. Built
-// once at Setup.
+// Which Switch buttons press each Xbox 360 button: per player (1 to 4), one table per face-button layout
+// (input_xbox_layout), that player's overrides (input_p1_* ... input_p4_*) applied to both. Built at Setup, and again
+// when the game menu changes a map (RebuildButtonMaps, blur-nx 2026-11-18): under g_tables_mutex, which Poll holds
+// while it copies its player's table.
 struct ButtonTable {
   std::array<uint64_t, 16> buttons{};  // per XInput button bit (X_INPUT_GAMEPAD_*: bit i)
   uint64_t left_trigger = 0, right_trigger = 0;
 };
-std::array<std::array<ButtonTable, 2>, 2> g_tables;  // [player 1 / 2][0 by letter, 1 by position]
+std::array<std::array<ButtonTable, 2>, 4> g_tables;  // [player 1 to 4][0 by letter, 1 by position]
+std::mutex g_tables_mutex;
 
 constexpr int BitIndex(uint16_t bit) { return std::countr_zero(bit); }
 
-// One name of input_p1_* / input_p2_*: the Switch buttons it stands for (0 for NONE), false when unknown.
+// One name of input_pN_*: the Switch buttons it stands for (0 for NONE), false when unknown.
 bool SwitchButtonByName(std::string name, uint64_t& out) {
   for (char& c : name) c = char(std::toupper(static_cast<unsigned char>(c)));
   static const std::pair<const char*, uint64_t> kNames[] = {
@@ -172,7 +204,8 @@ bool ParseButtonList(const char* cvar, const std::string& list, uint64_t& out) {
 }
 
 void BuildButtonTables() {
-  for (auto& player : g_tables) {
+  std::array<std::array<ButtonTable, 2>, 4> tables;  // blur-nx (2026-11-18): built aside, then swapped in
+  for (auto& player : tables) {
     for (int layout = 0; layout < 2; ++layout) {
       ButtonTable& t = player[layout];
       t = {};
@@ -220,14 +253,15 @@ void BuildButtonTables() {
     {"input_" #P "_left", REXCVAR_GET(input_##P##_left), BitIndex(X_INPUT_GAMEPAD_DPAD_LEFT)},    \
     {"input_" #P "_right", REXCVAR_GET(input_##P##_right), BitIndex(X_INPUT_GAMEPAD_DPAD_RIGHT)}, \
   }
-  const Override overrides[2][16] = {REX_INPUT_OVERRIDES(p1), REX_INPUT_OVERRIDES(p2)};
+  const Override overrides[4][16] = {REX_INPUT_OVERRIDES(p1), REX_INPUT_OVERRIDES(p2), REX_INPUT_OVERRIDES(p3),
+                                     REX_INPUT_OVERRIDES(p4)};
 #undef REX_INPUT_OVERRIDES
-  for (size_t player = 0; player < g_tables.size(); ++player) {
+  for (size_t player = 0; player < tables.size(); ++player) {
     for (const Override& o : overrides[player]) {
       if (o.value.empty()) continue;
       uint64_t mask = 0;
       if (!ParseButtonList(o.name, o.value, mask)) continue;
-      for (ButtonTable& t : g_tables[player]) {
+      for (ButtonTable& t : tables[player]) {
         if (o.bit == -1) t.left_trigger = mask;
         else if (o.bit == -2) t.right_trigger = mask;
         else t.buttons[o.bit] = mask;
@@ -235,13 +269,42 @@ void BuildButtonTables() {
       REXLOG_INFO("{} = {}", o.name, o.value);
     }
   }
+  std::lock_guard<std::mutex> lock(g_tables_mutex);
+  g_tables = tables;
+}
+
+// blur-nx (2026-11-18): the game menu's buttons (input_menu_combo; SetGameMenuCombo): 0 until Setup sets them.
+std::atomic<uint64_t> g_game_menu_combo{0};
+
+// "A+B+X+Y+L+R" -> their buttons; 0 when a name is unknown or there are fewer than two.
+uint64_t ParseMenuCombo(const std::string& text) {
+  uint64_t mask = 0;
+  std::string token;
+  int count = 0;
+  bool bad = false;
+  auto flush = [&]() {
+    if (token.empty()) return;
+    uint64_t m = 0;
+    if (!SwitchButtonByName(token, m) || m == 0) bad = true;
+    mask |= m;
+    ++count;
+    token.clear();
+  };
+  for (char c : text) {
+    if (c == '+' || c == ',' || c == ' ' || c == '\t')
+      flush();
+    else
+      token += c;
+  }
+  flush();
+  return bad || count < 2 || std::popcount(mask) < 2 ? 0 : mask;
 }
 
 // The presses of a single Joy-Con held sideways, as a two-handed controller reports the same places (the right face
 // button is A, the bottom one B, the top one X, the left one Y). The system names a single Joy-Con's buttons as they
 // are printed; held sideways the left Joy-Con's arrow buttons and the right Joy-Con's letters turn a quarter: same
 // table as devkitPro's SDL (pad_mapping_left_joy / pad_mapping_right_joy). SL / SR are the triggers (ZL / ZR) and stay
-// readable as SL / SR for input_p1_* / input_p2_*; minus or plus is Start; the stick
+// readable as SL / SR for input_p1_* ... input_p4_*; minus or plus is Start; the stick
 // click is LSTICK.
 uint64_t SidewaysLeftJoyCon(uint64_t p) {
   uint64_t v = 0;
@@ -371,8 +434,12 @@ struct SwitchInputDriver::Slot {
   bool connected = false;
   DeviceId id = DeviceId::kInvalid;
   // The guest player this controller is (0 = player 1), as the input system assigned it (OnDevicesAssigned): picks
-  // the button table (player 2's map for player 2, player 1's for the others).
+  // the button table (each of players 1 to 4 its own map; port 55).
   uint32_t ordinal = 0;
+  // sasrt-nx (2026-11-03, input_switch_disconnect_grace_ms; port 52): when HID first reported the pad absent (0: it is
+  // there), and the connection count then (another pad connecting ends the grace).
+  int64_t disconnected_since_ns = 0;
+  uint32_t disconnected_at_count = 0;
 
   X_INPUT_STATE state{};
   bool state_changed = false;
@@ -383,6 +450,8 @@ struct SwitchInputDriver::Slot {
    * See DispatchMenuShortcuts.
    */
   uint64_t menu_shortcuts = 0;
+  // Port 206 (sims3-nx's): ZL and ZR seen during the current L+R hold (the two trigger shortcuts below).
+  uint64_t trigger_seen = 0;
 
   // Keystroke synthesis, per pad rather than per guest user.
   uint64_t key_buttons = 0;
@@ -407,6 +476,148 @@ struct SwitchInputDriver::Slot {
   uint16_t vibration_right = 0;
 };
 
+// blur-nx (2026-11-17, the Renut audit's #6, input_switch_rumble_thread): hidSendVibrationValues is an IPC request to
+// the HID service that blocks its caller; Blur's race had it at 0.46 % of the Game Master (the frame's critical thread),
+// the game changing the rumble every few frames. With the key on, SetDeviceVibration hands the latest values of each
+// pad to this thread, which sends them: the same values in the same order per pad, a little later (well within a
+// frame). A send that fails is retried by the game thread's next call, as before (TakeFailed).
+REXCVAR_DEFINE_BOOL(input_switch_rumble_thread, true, "Input",
+                    "blur-nx (the Renut audit's #6): rumble values go to the controller from a background thread, not "
+                    "from the game thread that set them (an IPC request that blocks: 0.46 % of Blur's Game Master). "
+                    "false: sent on the game thread, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+namespace {
+class RumbleSender {
+ public:
+  static constexpr size_t kKeys = 9;  // npads No1-No8, then handheld
+  static size_t KeyOf(HidNpadIdType id) { return id == HidNpadIdType_Handheld ? 8 : size_t(id) & 7; }
+
+  // false: the rumble thread is not running (the caller sends the values itself).
+  bool Post(HidNpadIdType id, const HidVibrationDeviceHandle* handles, int count,
+            const std::array<HidVibrationValue, 2>& values) {
+    const size_t k = KeyOf(id);
+    bool wake;
+    {
+      std::lock_guard<std::mutex> lock(m_);
+      if (stopped_) return true;  // the driver's teardown: nothing more is sent
+      if (!started_) {
+        started_ = true;
+        // A libnx thread: std::thread is not implemented on Horizon (std::system_error "Function not implemented",
+        // batch 3's first console run, 2026-11-17 12:48). Priority 0x3B, the game threads' and the lowest this
+        // process may use (0x3C was refused: the second run fell back to the game thread); the process's default
+        // core, a 32 KiB stack; never joined (the sender lives as long as the process). It sleeps in its condition
+        // variable or in the HID request, so it takes little of the game threads' time slices.
+        Result rc = threadCreate(&thread_, &RumbleSender::Entry, this, nullptr, 0x8000, 0x3B, -2);
+        if (R_SUCCEEDED(rc)) rc = threadStart(&thread_);
+        if (R_FAILED(rc)) {
+          failed_start_ = true;
+          static uint32_t logged = 0;
+          if (logged++ < 4)
+            REXLOG_WARN("input: the rumble thread could not start (0x{:X}): rumble sent from the game thread",
+                        unsigned(rc));
+        } else {
+          REXLOG_INFO("input: rumble thread started (input_switch_rumble_thread)");
+        }
+      }
+      if (failed_start_) return false;
+      Request& r = req_[k];
+      std::copy(handles, handles + count, r.handles.begin());
+      r.count = count;
+      r.values = values;
+      r.pending = true;
+      wake = waiting_;
+    }
+    if (wake) cv_.notify_one();
+    return true;
+  }
+
+  // The last send for this pad failed: the game thread sends its next value even if unchanged.
+  bool TakeFailed(HidNpadIdType id) { return failed_[KeyOf(id)].exchange(false, std::memory_order_relaxed); }
+
+  // Nothing is sent after this returns (the driver's teardown stops the pads itself).
+  void Stop() {
+    std::unique_lock<std::mutex> lock(m_);
+    stopped_ = true;
+    for (Request& r : req_) r.pending = false;
+    idle_cv_.wait(lock, [this] { return !sending_; });
+  }
+
+ private:
+  struct Request {
+    std::array<HidVibrationDeviceHandle, 2> handles{};
+    int count = 0;
+    std::array<HidVibrationValue, 2> values{};
+    bool pending = false;
+  };
+
+  bool Started() const { return !failed_start_; }
+
+  static void Entry(void* self) { static_cast<RumbleSender*>(self)->Main(); }
+
+  void Main() {
+    std::array<Request, kKeys> todo;
+    for (;;) {
+      size_t n = 0;
+      {
+        std::unique_lock<std::mutex> lock(m_);
+        waiting_ = true;
+        cv_.wait(lock, [this] {
+          if (stopped_) return true;
+          for (const Request& r : req_)
+            if (r.pending) return true;
+          return false;
+        });
+        waiting_ = false;
+        if (stopped_) return;
+        for (size_t k = 0; k < kKeys; ++k) {
+          if (req_[k].pending) {
+            todo[k] = req_[k];
+            req_[k].pending = false;
+            ++n;
+          } else {
+            todo[k].pending = false;
+          }
+        }
+        sending_ = true;
+      }
+      for (size_t k = 0; k < kKeys; ++k) {
+        if (!todo[k].pending) continue;
+        if (R_FAILED(hidSendVibrationValues(todo[k].handles.data(), todo[k].values.data(), todo[k].count))) {
+          failed_[k].store(true, std::memory_order_relaxed);
+          static uint32_t failures = 0;
+          if (failures++ < 4) REXLOG_WARN("input: rumble send failed on the rumble thread (pad key {})", k);
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lock(m_);
+        sending_ = false;
+      }
+      idle_cv_.notify_all();
+      (void)n;
+    }
+  }
+
+  std::mutex m_;
+  std::condition_variable cv_, idle_cv_;
+  std::array<Request, kKeys> req_{};
+  std::array<std::atomic<bool>, kKeys> failed_{};
+  bool started_ = false, waiting_ = false, sending_ = false, stopped_ = false;
+  bool failed_start_ = false;  // the thread could not start: the game thread sends (RumbleThreadOn's caller checks)
+  Thread thread_{};
+};
+
+RumbleSender& Rumble() {
+  static RumbleSender* sender = new RumbleSender;  // never destroyed: its thread is detached
+  return *sender;
+}
+
+bool RumbleThreadOn() {
+  static const bool on = REXCVAR_GET(input_switch_rumble_thread);
+  return on;
+}
+}  // namespace
+
 SwitchInputDriver::SwitchInputDriver(rex::ui::Window* window, size_t window_z_order)
     : InputDriver(window, window_z_order) {}
 
@@ -416,6 +627,8 @@ SwitchInputDriver::~SwitchInputDriver() {
   }
   // XInput vibration holds until changed, so a pad left rumbling would keep
   // rumbling after the process exits.
+  if (RumbleThreadOn())
+    Rumble().Stop();  // blur-nx (2026-11-17, audit #6): nothing of the thread's after the stops below
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto& slot : slots_) {
     if (slot && slot->vibration_count) {
@@ -455,6 +668,12 @@ X_STATUS SwitchInputDriver::Setup() {
     slots_[i] = std::move(slot);
   }
   BuildButtonTables();
+  // blur-nx (2026-11-18): the game menu's buttons.
+  if (!SetGameMenuCombo(REXCVAR_GET(input_menu_combo))) {
+    REXLOG_WARN("input_menu_combo = \"{}\": not two or more known buttons; A+B+X+Y+L+R",
+                REXCVAR_GET(input_menu_combo));
+    SetGameMenuCombo("A+B+X+Y+L+R");
+  }
   hidPermitVibration(true);
   initialized_ = true;
   return X_STATUS_SUCCESS;
@@ -568,6 +787,34 @@ void SwitchInputDriver::Poll(size_t index) {
   padUpdate(&slot.pad);
 
   const bool connected = padIsConnected(&slot.pad);
+  // sasrt-nx (2026-11-03, input_switch_disconnect_grace_ms; port 52): a pad reported absent stays connected, with its
+  // last state, until it has been absent for the grace time; a pad back within it was never gone to the game. The base
+  // keeps the handheld on a slot of its own (slot 0), so a pad connecting meanwhile ends the grace: the player moved to
+  // it, and the game is not shown two pads for the grace time.
+  if (!connected && slot.connected) {
+    const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    const int64_t grace_ms = REXCVAR_GET(input_switch_disconnect_grace_ms);
+    if (slot.disconnected_since_ns == 0) {
+      slot.disconnected_since_ns = now;
+      slot.disconnected_at_count = connection_counter_;
+    }
+    const int64_t absent_ms = (now - slot.disconnected_since_ns) / 1000000;
+    if (grace_ms > 0 && absent_ms < grace_ms && connection_counter_ == slot.disconnected_at_count) {
+      return;
+    }
+    REXLOG_INFO("SwitchInputDriver: pad {} absent for {} ms: reported disconnected{}", index, absent_ms,
+                connection_counter_ != slot.disconnected_at_count ? " (another pad connected)" : "");
+    slot.disconnected_since_ns = 0;
+  } else if (connected && slot.disconnected_since_ns != 0) {
+    const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    REXLOG_INFO("SwitchInputDriver: pad {} back after {} ms absent: kept connected", index,
+                (now - slot.disconnected_since_ns) / 1000000);
+    slot.disconnected_since_ns = 0;
+  }
   if (connected != slot.connected) {
     slot.connected = connected;
     if (connected) {
@@ -591,10 +838,17 @@ void SwitchInputDriver::Poll(size_t index) {
   // A single Joy-Con held sideways (input_joycon_sideways): its presses as a two-handed controller's, and its one
   // stick as the left stick (the right Joy-Con reports its stick as stick 1), turned a quarter for the grip
   // (input_joycon_sideways_stick; the stick values are -32767..32767, so the negation stays in range).
+  {  // blur-nx (2026-11-18): input_joycon_sideways changed in the game menu: the system is told the new hold type
+    static std::atomic<int> told{-1};  // -1: Setup told it (or left the system's upright default)
+    const int want = REXCVAR_GET(input_joycon_sideways) ? 1 : 0;
+    int was = told.load(std::memory_order_relaxed);
+    if (was != want && told.compare_exchange_strong(was, want) && was != -1)
+      hidSetNpadJoyHoldType(want ? HidNpadJoyHoldType_Horizontal : HidNpadJoyHoldType_Vertical);
+  }
   if (index != 0 && REXCVAR_GET(input_joycon_sideways)) {
     const uint32_t style = padGetStyleSet(&slot.pad);
     const uint32_t whole = HidNpadStyleTag_NpadJoyDual | HidNpadStyleTag_NpadFullKey | HidNpadStyleTag_NpadHandheld;
-    static const bool turn = REXCVAR_GET(input_joycon_sideways_stick);
+    const bool turn = REXCVAR_GET(input_joycon_sideways_stick);  // blur-nx (2026-11-18): live (the game menu)
     if (!(style & whole) && (style & HidNpadStyleTag_NpadJoyLeft)) {
       held = SidewaysLeftJoyCon(held);
       // Its top (the L button) points left: the Joy-Con's up is left, its right (the rail) is up.
@@ -612,8 +866,23 @@ void SwitchInputDriver::Poll(size_t index) {
     RouteRecording(held, left, right);
   }
   DispatchMenuShortcuts(slot, held);
+  // blur-nx (2026-11-18): the game menu's buttons (input_menu_combo, A+B+X+Y+L+R by default). While the combo's
+  // shoulders and triggers (two or more of its L, R, ZL, ZR) are all held, its other buttons do not reach the game:
+  // held first, they keep the rest of the combo from it (by default: L and R held, A, B, X and Y are the menu's). They
+  // reach the game again when one of those is let go.
+  {
+    constexpr uint64_t kHeldFirst = HidNpadButton_L | HidNpadButton_R | HidNpadButton_ZL | HidNpadButton_ZR;
+    const uint64_t combo = g_game_menu_combo.load(std::memory_order_relaxed);
+    const uint64_t first = combo & kHeldFirst;
+    if (std::popcount(first) >= 2 && (held & first) == first)
+      held &= ~(combo & ~first);
+  }
   X_INPUT_GAMEPAD gamepad{};
-  const ButtonTable& table = g_tables[slot.ordinal == 1 ? 1 : 0][REXCVAR_GET(input_xbox_layout) ? 1 : 0];
+  ButtonTable table;  // blur-nx (2026-11-18): a copy (the game menu may rebuild the maps meanwhile)
+  {
+    std::lock_guard<std::mutex> lock(g_tables_mutex);
+    table = g_tables[slot.ordinal < g_tables.size() ? slot.ordinal : 0][REXCVAR_GET(input_xbox_layout) ? 1 : 0];
+  }
   uint16_t buttons = 0;
   for (int i = 0; i < 16; ++i) {
     if (held & table.buttons[i]) {
@@ -625,6 +894,21 @@ void SwitchInputDriver::Poll(size_t index) {
   gamepad.left_trigger = (held & table.left_trigger) ? 0xFF : 0;
   gamepad.right_trigger = (held & table.right_trigger) ? 0xFF : 0;
   // HID reports up as positive Y, like XInput, so no inversion is needed.
+  if (const int32_t dz = REXCVAR_GET(input_stick_deadzone); dz > 0) {  // port 195
+    auto apply = [dz](HidAnalogStickState& st) {
+      const float len = std::sqrt(float(st.x) * float(st.x) + float(st.y) * float(st.y));
+      const float inner = 32767.0f * float(dz) / 100.0f;
+      if (len <= inner) {
+        st = HidAnalogStickState{};
+        return;
+      }
+      const float out = std::min(32767.0f, (len - inner) * 32767.0f / (32767.0f - inner));
+      st.x = s32(float(st.x) * out / len);
+      st.y = s32(float(st.y) * out / len);
+    };
+    apply(left);
+    apply(right);
+  }
   gamepad.thumb_lx = ClampStickAxis(left.x);
   gamepad.thumb_ly = ClampStickAxis(left.y);
   gamepad.thumb_rx = ClampStickAxis(right.x);
@@ -648,6 +932,7 @@ void SwitchInputDriver::Poll(size_t index) {
     slot.state_changed = true;
   }
 }
+
 
 
 /* From the profiler (switch_perf.cpp): turns the GPU A/B test lap on and off. */
@@ -711,37 +996,65 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
   }
 
   /*
-   * L+R+ZL starts the A/B test lap (switch_perf.cpp). It sends no key to the
-   * game: it talks directly to the profiler. It is kept apart from the loop
-   * above because that one translates buttons into keys and this is not a key.
+   * L+R+ZL starts the A/B test lap (switch_perf.cpp; it talks to the profiler, no key to the game); L+R+ZR opens the
+   * system's controller applet (connect a second controller, change the player order, split a Joy-Con pair; on the UI
+   * thread, like the menus). renut-ultimate (2026-11-20, port 206; sims3-nx's): both fire when the trigger is let go,
+   * and only if the other trigger was not pressed during the same L+R hold. L+R+ZL+ZR (LB+RB+LT+RT) is a game's own
+   * combination in some titles (The Sims 3's cheats) and now reaches the game without opening anything.
    */
-  const uint64_t kBitAb = uint64_t(1) << 8;
-  const bool ab_now = modifier && (held & HidNpadButton_ZL) != 0;
-  const bool ab_before = (slot.menu_shortcuts & kBitAb) != 0;
-  if (ab_now && !ab_before) {
-    RexSwitchPerfToggleAb();
-    REXLOG_INFO("menu shortcut: GPU A/B tests");
-  }
-  slot.menu_shortcuts = ab_now ? (slot.menu_shortcuts | kBitAb)
-                                 : (slot.menu_shortcuts & ~kBitAb);
-
-  /*
-   * L+R+ZR opens the system's controller applet: connect a second controller, change the player order, or split a
-   * Joy-Con pair into two sideways Joy-Cons for two players. On the UI thread, like the menus (it blocks until the
-   * player closes it).
-   */
-  const uint64_t kBitApplet = uint64_t(1) << 9;
-  const bool applet_now = modifier && (held & HidNpadButton_ZR) != 0;
-  const bool applet_before = (slot.menu_shortcuts & kBitApplet) != 0;
-  if (applet_now && !applet_before) {
-    REXLOG_INFO("menu shortcut: controllers");
-    auto show = [this] { ShowControllerApplet(); };
-    rex::ui::Window* const window = window_ui_.load(std::memory_order_acquire);
-    if (!window || !window->app_context().CallInUIThread(show)) {
-      show();
+  constexpr uint64_t kTriggers = HidNpadButton_ZL | HidNpadButton_ZR;
+  const uint64_t triggers = held & kTriggers;
+  if (modifier) slot.trigger_seen |= triggers;
+  if (!triggers && slot.trigger_seen) {
+    const uint64_t seen = slot.trigger_seen;
+    slot.trigger_seen = 0;
+    if (seen == HidNpadButton_ZL) {
+      RexSwitchPerfToggleAb();
+      REXLOG_INFO("menu shortcut: GPU A/B tests");
+    } else if (seen == HidNpadButton_ZR) {
+      REXLOG_INFO("menu shortcut: controllers");
+      auto show = [this] { ShowControllerApplet(); };
+      rex::ui::Window* const window = window_ui_.load(std::memory_order_acquire);
+      if (!window || !window->app_context().CallInUIThread(show)) {
+        show();
+      }
+    } else {
+      REXLOG_INFO("menu shortcut: none (L+R+ZL+ZR goes to the game)");
     }
   }
-  slot.menu_shortcuts = applet_now ? (slot.menu_shortcuts | kBitApplet) : (slot.menu_shortcuts & ~kBitApplet);
+
+  /*
+   * blur-nx (2026-11-18, the user: "an imgui overlay opened up with the button combination of A+B+X+Y+L+R and closed
+   * with the start button"): the six held together open the game menu, the application's F8 bind (on the UI thread,
+   * as the menus above). The menu closes itself on + and owns every button meanwhile (rex::ui::GameInputBlocked).
+   */
+  const uint64_t kBitGameMenu = uint64_t(1) << 10;
+  const uint64_t kGameMenu = g_game_menu_combo.load(std::memory_order_relaxed);  // input_menu_combo
+  const bool game_menu_now = kGameMenu != 0 && (held & kGameMenu) == kGameMenu;
+  const bool game_menu_before = (slot.menu_shortcuts & kBitGameMenu) != 0;
+  // Port 182 (from blur-nx, its b3108d23 of 2026-11-18; RR6's finding in Ryujinx with three pads connected): one press
+  // of the combo seen by several slots at once (the same buttons on more than one pad) sent F8 once per slot in the same
+  // millisecond, and the menu opened and closed again. One dispatch per 500 ms across all slots: a press of the six
+  // buttons is one.
+  static std::atomic<int64_t> game_menu_last_ms{INT64_MIN / 2};
+  const int64_t game_menu_now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count();
+  int64_t game_menu_prev_ms = game_menu_last_ms.load(std::memory_order_relaxed);
+  if (game_menu_now && !game_menu_before && game_menu_now_ms - game_menu_prev_ms >= 500 &&
+      game_menu_last_ms.compare_exchange_strong(game_menu_prev_ms, game_menu_now_ms, std::memory_order_relaxed)) {
+    auto press = [] {
+      rex::ui::KeyEvent keystroke(nullptr, rex::ui::VirtualKey::kF8, 1, false, false, false, false, false);
+      rex::ui::ProcessKeyEvent(keystroke);
+    };
+    rex::ui::Window* const window = window_ui_.load(std::memory_order_acquire);
+    if (!window || !window->app_context().CallInUIThread(press)) {
+      press();
+    }
+    REXLOG_INFO("menu shortcut: the game menu (input_menu_combo)");
+  }
+  slot.menu_shortcuts =
+      game_menu_now ? (slot.menu_shortcuts | kBitGameMenu) : (slot.menu_shortcuts & ~kBitGameMenu);
 }
 
 void SwitchInputDriver::ShowControllerApplet() {
@@ -914,17 +1227,33 @@ X_RESULT SwitchInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* v
                                               static_cast<HidNpadStyleTag>(style));
     if (R_FAILED(rc)) {
       slot->vibration_count = 0;
+      // renut-ultimate (2026-11-10, rumble on by default): the first few failures logged, as the sends below.
+      static uint32_t init_failures = 0;
+      if (init_failures++ < 4)
+        REXLOG_WARN("input: rumble could not be set up on npad {} (style 0x{:X}): 0x{:X}", unsigned(npad_id), style,
+                    unsigned(rc));
       return X_ERROR_FUNCTION_FAILED;
     }
     slot->vibration_npad_id = npad_id;
     slot->vibration_style = style;
     slot->vibration_count = count;
     slot->vibration_sent = false;  // new or reassigned controller: it needs the state sent
+    // renut-ultimate (2026-11-10): once per controller layout (a new pad, a Joy-Con pair split or joined).
+    REXLOG_INFO("input: rumble ready on npad {} ({}, {} motor{})", unsigned(npad_id),
+                style == HidNpadStyleTag_NpadHandheld   ? "handheld"
+                : style == HidNpadStyleTag_NpadFullKey  ? "Pro Controller"
+                : style == HidNpadStyleTag_NpadJoyDual  ? "Joy-Con pair"
+                : style == HidNpadStyleTag_NpadJoyLeft  ? "left Joy-Con"
+                                                        : "right Joy-Con",
+                count, count == 1 ? "" : "s");
   }
 
   // See the vibration_sent comment in Slot: same value as the last one sent, nothing to do.
   const uint16_t left = uint16_t(vibration->left_motor_speed);
   const uint16_t right = uint16_t(vibration->right_motor_speed);
+  // blur-nx (2026-11-17, audit #6): a send the rumble thread could not make is made again.
+  if (RumbleThreadOn() && Rumble().TakeFailed(npad_id))
+    slot->vibration_sent = false;
   if (slot->vibration_sent && slot->vibration_left == left &&
       slot->vibration_right == right) {
     return X_ERROR_SUCCESS;
@@ -938,10 +1267,22 @@ X_RESULT SwitchInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* v
   value.amp_high = float(uint16_t(vibration->right_motor_speed)) / 65535.0f;
   value.freq_high = 320.0f;
   std::array<HidVibrationValue, 2> values = {value, value};
-  if (R_FAILED(hidSendVibrationValues(slot->vibration_handles.data(), values.data(),
-                                      slot->vibration_count))) {
+  if (RumbleThreadOn() &&  // blur-nx (2026-11-17, audit #6): sent by the rumble thread when it runs
+      Rumble().Post(npad_id, slot->vibration_handles.data(), slot->vibration_count, values)) {
+  } else if (const Result rc = hidSendVibrationValues(slot->vibration_handles.data(), values.data(), slot->vibration_count);
+      R_FAILED(rc)) {
     slot->vibration_sent = false;  // retried on the next call
+    static uint32_t send_failures = 0;  // renut-ultimate (2026-11-10)
+    if (send_failures++ < 4)
+      REXLOG_WARN("input: rumble send failed on npad {}: 0x{:X}", unsigned(npad_id), unsigned(rc));
     return X_ERROR_FUNCTION_FAILED;
+  }
+  // renut-ultimate (2026-11-10): the game's first rumble, once a run (the tests' proof that it reaches the pad).
+  static bool first_rumble_logged = false;
+  if (!first_rumble_logged && (left || right)) {
+    first_rumble_logged = true;
+    REXLOG_INFO("input: first rumble sent to npad {} (heavy motor {:.2f}, light {:.2f})", unsigned(npad_id),
+                value.amp_low, value.amp_high);
   }
   slot->vibration_sent = true;
   slot->vibration_left = left;
@@ -1031,6 +1372,19 @@ X_RESULT SwitchInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
     }
   }
   return X_ERROR_EMPTY;
+}
+
+// blur-nx (2026-11-18, the game menu): the button maps built again from input_p1_* ... input_p4_* (set them first).
+void RebuildButtonMaps() { BuildButtonTables(); }
+
+// blur-nx (2026-11-18): the game menu's buttons from now on (input_menu_combo's form); false (nothing changed) when the
+// text is not two or more known buttons.
+bool SetGameMenuCombo(const std::string& text) {
+  const uint64_t mask = ParseMenuCombo(text);
+  if (mask == 0) return false;
+  g_game_menu_combo.store(mask, std::memory_order_relaxed);
+  REXLOG_INFO("game menu buttons: {}", text);
+  return true;
 }
 
 }  // namespace rex::input::nx

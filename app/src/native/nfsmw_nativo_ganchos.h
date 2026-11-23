@@ -4,7 +4,7 @@
 // The vertex shader microcode reaches the ring already patched by D3D: reordered fetches, swizzles from
 // the vertex declaration, and outputs the pixel shader does not read nulled out (measured on PC). Looking
 // it up in the library by content is not reliable. The exact identity is on the game thread:
-//   - The shader constructors (sub_8259BC90 PS, sub_8259C038 VS) receive the original container and
+//   - The shader constructors (sub_82580B80 PS, sub_82580F4C VS) receive the original container and
 //     return the object: object -> container.
 //   - Each D3D Draw* reads the bound VS and PS from the device and leaves a record in a queue. The ring
 //     sink pairs each draw with its record, in the same order, checking primitive type and count.
@@ -37,7 +37,7 @@ struct RegistroDibujo {
 /*
  * Direct3D-level renderer, phase 1 (shadow mode).
  *
- * The game's D3D keeps a copy (mirror) of the Xenos registers in the device, and FlushState (825A40C0)
+ * The game's D3D keeps a copy (mirror) of the Xenos registers in the device, and FlushState (82588EFC)
  * dumps it to the ring by dirty groups. If that mirror holds everything a draw needs, the renderer can
  * read it when drawing instead of reading the ~35 packets of each draw. This checks that without
  * touching anything: on 1 in 64 Draw* calls the mirror is snapshotted, and the ring, when pairing that
@@ -52,7 +52,7 @@ struct InstantaneaEspejo {
   uint32_t fetch[192] = {};                     // 0x4800.. (+0x480 of the device)
   uint32_t constantes[2048] = {};               // 0x4000.. VS (+0x780) y 0x4400.. PS (+0x1780)
 };
-// From the register dump hook (825A2AA0): which registers of which group, and where their mirror is.
+// From the register dump hook (82587AD4): which registers of which group, and where their mirror is.
 void AprenderGrupoEspejo(uint32_t registro_base, uint64_t mascara, uint32_t desplazamiento);
 // Ring thread only. false if the snapshot has already been reused for another draw.
 bool LeerInstantanea(uint64_t secuencia, InstantaneaEspejo& salida);
@@ -60,7 +60,7 @@ bool LeerInstantanea(uint64_t secuencia, InstantaneaEspejo& salida);
 /*
  * Phase 2 of the Direct3D-level renderer: FlushState's compound marker. See nfsmw_d3d_registros_nativo.cpp.
  *
- * FlushState (825A40C0) dumps the dirty registers of the device mirror with ~7 type 0 packets and ~6
+ * FlushState (82588EFC) dumps the dirty registers of the device mirror with ~7 type 0 packets and ~6
  * padding words per draw. With the marker it writes a single type 3 NOP packet with all the segments
  * inside, at the same place in the ring where the packets would have gone:
  *
@@ -176,7 +176,7 @@ struct DetalleVegetacion {
 // Draw* does not exist for the ring.
 uint16_t DecidirVegetacion(FuncionDibujo funcion, uint8_t* base, uint32_t dispositivo, uint32_t r5, uint32_t r6,
                            uint32_t r7, bool& saltar);
-// Game thread: IDirect3DQuery9::Issue (8258F810), before the original (query and flags: 2 BEGIN, 1 END).
+// Game thread: IDirect3DQuery9::Issue (8257385C), before the original (query and flags: 2 BEGIN, 1 END).
 void AnotarConsultaD3D(const uint8_t* base, uint32_t consulta, uint32_t banderas);
 // Ring thread (UsarRegistroDeDibujo): the record's flags if the draw uses its shaders; otherwise 0.
 uint16_t IdentidadParaVegetacion(uint16_t banderas, bool con_sus_shaders);

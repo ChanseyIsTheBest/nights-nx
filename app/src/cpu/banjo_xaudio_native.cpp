@@ -1,4 +1,4 @@
-// banjo-nx - native XAudio sample-rate converter: XAUDIO::SRC::LinearVector::ProcessBlock<short,1> (0x8267E990).
+// banjo-nx - native XAudio sample-rate converter: XAUDIO::SRC::LinearVector::ProcessBlock<short,1> (0x82666D60).
 // (2026-10-23, the user's request: hand-optimise the audio thread. The converter was 11 % of that thread in the
 // console's city profile, after the voice filter and the reverb.)
 //
@@ -53,7 +53,7 @@
 
 REXCVAR_DEFINE_BOOL(banjo_native_xaudio_src, true, "Banjo/Audio",
                     "Run XAudio's mono 16-bit linear sample-rate converter (SRC::LinearVector::ProcessBlock<short,1>, "
-                    "0x8267E990) as native code instead of the recompiled guest code: the same NEON operations without "
+                    "0x82666D60) as native code instead of the recompiled guest code: the same NEON operations without "
                     "the emulated vector gathers (bit-identical)");
 REXCVAR_DEFINE_BOOL(banjo_native_xaudio_src_verify, false, "Banjo/Audio",
                     "Debug: run both the native and the recompiled converter on every call, keep the recompiled one's "

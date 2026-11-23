@@ -28,6 +28,7 @@
 #include <rex/system/info/file.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/string_utils.h>
+#include <rex/system/wait_registry.h>
 #include <rex/system/xevent.h>
 #include <rex/system/xfile.h>
 #include <rex/system/xiocompletion.h>
@@ -281,6 +282,12 @@ void MaybeSummaryIo(uint64_t now_us) {
       "files with a window",
       d.misses_in_dry, d.stats_in_sd, d.swept_in_sd, paths.inputs_in_tree, d.hits,
       d.filled, d.direct, d.bytes_ram / (1024.0 * 1024.0), window.live_windows);
+  // culdcept-nx (2026-11-20): since startup.
+  const auto keep = rex::filesystem::ReadStatsKeepOpen();
+  REXKRNL_INFO(
+      "[io] keep-open: {} opens reused a parked handle, {} closes parked theirs, {} closed beyond the cap, {} parked "
+      "now; {} size queries answered without a stat",
+      keep.reused, keep.parked, keep.evicted, keep.live, keep.restats_skipped);
 
   /*
    * The line that tells whether a block cache is worth it and whether the window has anything to do.
@@ -533,6 +540,8 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
                      mapped_void buffer, u32 buffer_length, mapped_u64 byte_offset_ptr) {
   uint64_t byte_offset = byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : 0;
   const bool apc_requested = (static_cast<uint32_t>(apc_routine_ptr) & ~1u) != 0;
+  // blur-nx (2026-11-14, rex/system/wait_registry.h): the stall watchdog's quiet trigger counts the reads.
+  rex::system::waitreg::NoteFileRead(buffer_length);
   REXKRNL_IMPORT_TRACE(
       "NtReadFile",
       "handle={:#x} event={:#x} apc={:#x} apc_ctx={:#x} iosb={:#x} buf={:#x} len={:#x} offset={}",

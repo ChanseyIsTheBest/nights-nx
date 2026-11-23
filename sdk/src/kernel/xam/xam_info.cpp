@@ -9,6 +9,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/cvar.h>
+#include <rex/kernel/xboxkrnl/threading.h>  // port 143: XamSwapDisc's event
 #include <rex/kernel/xam/module.h>
 #include <rex/kernel/xam/private.h>
 #include <rex/logging.h>
@@ -16,6 +18,7 @@
 #include <rex/types.h>
 #include <rex/string.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/flags.h>  // blur-nx (2026-11-18): EffectiveLanguage
 #include <rex/system/user_module.h>
 #include <rex/system/xenumerator.h>
 #include <rex/system/xthread.h>
@@ -27,6 +30,46 @@
 
 #include <fmt/format.h>
 #include <fmt/xchar.h>
+
+#if defined(__SWITCH__)
+#include <pthread.h>
+#include <unistd.h>
+#include <cstdio>
+#include "../../core/threading_switch.h"
+extern "C" unsigned int svcSetThreadActivity(unsigned int handle, unsigned int paused);
+// libnx: the next homebrew to load once this one exits (the homebrew loader), and this NRO's own argv.
+extern "C" unsigned int envSetNextLoad(const char* path, const char* argv);
+extern "C" char** __system_argv;
+#endif
+
+// renut-ultimate (2026-11-20, port 205): sims3-nx (github.com/Zumoly/sims3-nx, GPL-3.0, v0.1.1). A title that relaunches itself (XamLoaderLaunchTitle of its own
+// executable, with launch data: The Sims 3 goes back to its main menu that way) ended on the Switch, where nothing
+// starts a terminated title again. Now the launch data waits in relaunch.bin beside the NRO, the homebrew loader is
+// asked to load the same NRO again, and the next start's XamLoaderGetLaunchData answers from the file.
+REXCVAR_DEFINE_BOOL(xam_relaunch_self, true, "Kernel",
+                    "Switch: a title's XamLoaderLaunchTitle of its own executable loads the NRO again with the launch "
+                    "data (relaunch.bin beside the NRO; the homebrew loader's next load) instead of ending");
+
+namespace {
+std::string RelaunchFile() {
+#if defined(__SWITCH__)
+  if (__system_argv && __system_argv[0]) {
+    std::string path = __system_argv[0];
+    const size_t slash = path.find_last_of('/');
+    if (slash != std::string::npos) return path.substr(0, slash + 1) + "relaunch.bin";
+  }
+#endif
+  return "relaunch.bin";
+}
+}  // namespace
+
+REXCVAR_DECLARE(uint32_t, user_language);  // xam_user.cpp
+// renut-ultimate (2026-11-16, port 143; tw2de_nx's, off by default).
+REXCVAR_DEFINE_BOOL(xam_swap_disc_signal, false, "Kernel",
+                    "tw2de_nx (exact): XamSwapDisc (with no title handler, SetSwapDiscHandler) sets the completion "
+                    "event the game passes and waits on: every disc's files are in the one game folder, so the swap is "
+                    "done at once. FINAL FANTASY XIII waited for ever at the end of chapter 4 (insert disc 2). false: "
+                    "success returned and the event left unset, as before");
 
 namespace rex {
 namespace kernel {
@@ -183,19 +226,9 @@ u32 XGetGameRegion_entry() {
 }
 
 u32 XGetLanguage_entry() {
-  auto desired_language = XLanguage::kEnglish;
-
-  // Switch the language based on game region.
-  // TODO(benvanik): pull from xex header.
-  uint32_t game_region = XEX_REGION_NTSCU;
-  if (game_region & XEX_REGION_NTSCU) {
-    desired_language = XLanguage::kEnglish;
-  } else if (game_region & XEX_REGION_NTSCJ) {
-    desired_language = XLanguage::kJapanese;
-  }
-  // Add more overrides?
-
-  return uint32_t(desired_language);
+  // katamari-nx (2026-11-02): the player's language (user_language, as the console's system setting), which this call
+  // used to ignore: it always answered English, and this is the only language query Beautiful Katamari makes.
+  return rex::system::EffectiveLanguage();  // blur-nx (2026-11-18): the language key, "System" by default
 }
 
 u32 XamGetCurrentTitleId_entry() {
@@ -232,12 +265,32 @@ u32 XamLoaderSetLaunchData_entry(mapped_void data, u32 size) {
   return 0;
 }
 
+// Port 205: the launch data left by the previous run's XamLoaderLaunchTitle (relaunch.bin), taken once.
+static void TakeRelaunchData(XamModule* xam) {
+  static bool taken = false;
+  if (taken) return;
+  taken = true;
+  const std::string file = RelaunchFile();
+  FILE* f = std::fopen(file.c_str(), "rb");
+  if (!f) return;
+  std::vector<uint8_t> bytes;
+  uint8_t chunk[4096];
+  for (size_t n; (n = std::fread(chunk, 1, sizeof(chunk), f)) > 0;) bytes.insert(bytes.end(), chunk, chunk + n);
+  std::fclose(f);
+  std::remove(file.c_str());
+  auto& loader_data = xam->loader_data();
+  loader_data.launch_data_present = !bytes.empty();
+  loader_data.launch_data = std::move(bytes);
+  REXKRNL_INFO("[loader] relaunched with {} bytes of launch data", loader_data.launch_data.size());
+}
+
 u32 XamLoaderGetLaunchDataSize_entry(mapped_u32 size_ptr) {
   if (!size_ptr) {
     return X_ERROR_INVALID_PARAMETER;
   }
 
   auto xam = REX_KERNEL_STATE()->GetKernelModule<XamModule>("xam.xex");
+  TakeRelaunchData(xam.get());  // port 205
   auto& loader_data = xam->loader_data();
   if (!loader_data.launch_data_present) {
     *size_ptr = 0;
@@ -250,6 +303,7 @@ u32 XamLoaderGetLaunchDataSize_entry(mapped_u32 size_ptr) {
 
 u32 XamLoaderGetLaunchData_entry(mapped_void buffer_ptr, u32 buffer_size) {
   auto xam = REX_KERNEL_STATE()->GetKernelModule<XamModule>("xam.xex");
+  TakeRelaunchData(xam.get());  // port 205
   auto& loader_data = xam->loader_data();
   if (!loader_data.launch_data_present) {
     return X_ERROR_NOT_FOUND;
@@ -283,6 +337,41 @@ void XamLoaderLaunchTitle_entry(mapped_string raw_name_ptr, u32 flags) {
   } else {
     assert_always("Game requested exit to dashboard via XamLoaderLaunchTitle");
   }
+  REXKRNL_INFO("[loader] XamLoaderLaunchTitle '{}' flags {:08X}, {} bytes of launch data", loader_data.launch_path,
+               uint32_t(flags), loader_data.launch_data_present ? loader_data.launch_data.size() : 0);
+
+#if defined(__SWITCH__)
+  // Port 205: the title's own executable again (not another XEX, not the dashboard): leave the launch data beside the
+  // NRO, ask the homebrew loader to load the NRO again, and exit now (guest threads still run, so no static
+  // destructors). Every other guest thread is paused first: the loader unmaps this NRO, and a thread still running its
+  // code crashed (sims3-nx's Instruction Abort).
+  const auto* exe = REX_KERNEL_STATE()->GetExecutableModule().get();
+  const bool own = raw_name_ptr && exe &&
+                   rex::string::utf8_find_name_from_guest_path(loader_data.launch_path) ==
+                       rex::string::utf8_find_name_from_guest_path(exe->path());
+  if (own && REXCVAR_GET(xam_relaunch_self) && __system_argv && __system_argv[0] && __system_argv[0][0]) {
+    if (FILE* f = std::fopen(RelaunchFile().c_str(), "wb")) {
+      if (loader_data.launch_data_present && !loader_data.launch_data.empty()) {
+        std::fwrite(loader_data.launch_data.data(), 1, loader_data.launch_data.size(), f);
+      }
+      std::fclose(f);
+    }
+    envSetNextLoad(__system_argv[0], __system_argv[0]);
+    const RexSwitchHandle self = RexSwitchHandleFor(pthread_self());
+    auto threads = REX_KERNEL_OBJECTS()->GetObjectsByType<rex::system::XThread>();
+    uint32_t paused = 0;
+    for (auto& thread : threads) {
+      if (!thread->thread()) continue;
+      const RexSwitchHandle handle =
+          RexSwitchHandleFor(reinterpret_cast<pthread_t>(thread->thread()->native_handle()));
+      if (handle == REX_SWITCH_INVALID_HANDLE || handle == self) continue;
+      if (svcSetThreadActivity(handle, 1) == 0) ++paused;
+    }
+    REXKRNL_INFO("[loader] paused {} threads, loading the NRO again", paused);
+    rex::FlushLogging();
+    _exit(0);
+  }
+#endif
 
   // This function does not return.
   REX_KERNEL_STATE()->TerminateTitle();
@@ -322,9 +411,19 @@ u32 XamLoaderGetDvdTrayState_entry(mapped_u32 out_state) {
   return X_STATUS_SUCCESS;
 }
 
-u32 XamSwapDisc_entry(u32 disc_number) {
+// XamSwapDisc(disc, the completion event, the dialog's texts). Port 143 (tw2de_nx, xam_swap_disc_signal): the event
+// set, as the swap is done; without it a multi-disc game waits on it for ever.
+u32 XamSwapDisc_entry(u32 disc_number, ppc_ptr_t<X_KEVENT> completion, u32 texts) {
+  (void)texts;
   // Stub for multi-disc games. Single-disc games (like Blue Dragon's reblue test)
   // don't need this, but the game may look it up dynamically via XexGetProcedureAddress.
+  static const bool signal = REXCVAR_GET(xam_swap_disc_signal);
+  if (signal && completion) {
+    REXKRNL_INFO("XamSwapDisc({}): every disc is the game folder, the swap is done (xam_swap_disc_signal)",
+                 (uint32_t)disc_number);
+    rex::kernel::xboxkrnl::xeKeSetEvent(completion, 1, 0);
+    return X_ERROR_SUCCESS;
+  }
   REXKRNL_DEBUG("XamSwapDisc({}) - stub, returning success", (uint32_t)disc_number);
   return X_STATUS_SUCCESS;
 }
@@ -362,4 +461,19 @@ REX_EXPORT(__imp__XamAlloc, rex::kernel::xam::XamAlloc_entry)
 REX_EXPORT(__imp__XamFree, rex::kernel::xam::XamFree_entry)
 REX_EXPORT(__imp__XamQueryLiveHiveW, rex::kernel::xam::XamQueryLiveHiveW_entry)
 REX_EXPORT(__imp__XamLoaderGetDvdTrayState, rex::kernel::xam::XamLoaderGetDvdTrayState_entry)
-REX_EXPORT(__imp__XamSwapDisc, rex::kernel::xam::XamSwapDisc_entry)
+// ds3-nx (2026-10-24, sdk-patches/0014; port 57): a multi-disc title can take the request over (switch its disc
+// mounts, signal the completion event the guest passes in r4) with rex::kernel::xam::SetSwapDiscHandler (module.h);
+// the stub above stays the default. The handler gets the guest call as it is.
+namespace rex::kernel::xam {
+static void (*g_swap_disc_handler)(PPCContext& ctx, uint8_t* base) = nullptr;
+void SetSwapDiscHandler(void (*handler)(PPCContext& ctx, uint8_t* base)) { g_swap_disc_handler = handler; }
+}  // namespace rex::kernel::xam
+extern "C" REX_FUNC(__imp__XamSwapDisc) {
+  REX_EXPORT_CENSUS("__imp__XamSwapDisc");
+  if (rex::kernel::xam::g_swap_disc_handler) {
+    rex::kernel::xam::g_swap_disc_handler(ctx, base);
+    return;
+  }
+  rex::ppc::HostToGuestFunction<rex::kernel::xam::XamSwapDisc_entry>(ctx, base);
+}
+static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__XamSwapDisc("__imp__XamSwapDisc", &__imp__XamSwapDisc);

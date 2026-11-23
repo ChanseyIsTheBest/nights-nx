@@ -61,6 +61,70 @@ INDIRECT = re.compile(r'REX_CALL_INDIRECT_')
 OTHER_CALL = re.compile(r'\b\w+\(ctx, base[,)]')
 
 
+# blur-nx (2026-11-17, #226 of docs/cpu-codegen-universal-30-1116.md): a third kind of loop needs no barrier: one whose
+# every branch decides on values the loop did not load. Its exits (bdnz's counter, a counter against a bound, ...) do
+# not depend on guest memory, so a load the compiler moves or merges across iterations cannot make it spin; what may
+# change is only when another thread's store is seen inside it, which a data-race-free program cannot tell (the rule
+# GCC applies to every plain load outside loops). Conservative: no call of any kind, no atomic, trap, return or switch
+# in the loop; no goto from outside into its middle; every register a line with a guest load (or a register so
+# reached) mentions counts as loaded. A census of the generated tree of 2026-11-16: 3,429 of 19,471 barriers.
+# BLUR_BARRIER_COUNTED=0 in the environment: the two kinds before it only.
+COUNTED = os.environ.get('BLUR_BARRIER_COUNTED', '1') != '0'
+IDENT = re.compile(r'(?<![\w.])([A-Za-z_]\w*)')
+
+
+def tokens(line):
+    """Every name a statement mentions that is not a field (registers whether ctx.rN, a local rN, a loop or leaf local
+    l_rN or r1_local's r1l, temporaries, ea, ...): a superset is safe here, it only keeps more barriers."""
+    out = set()
+    for t in IDENT.findall(line.replace('ctx.', '')):
+        if t.startswith('l_'):
+            t = t[2:]
+        if re.fullmatch(r'r\d+l', t):
+            t = t[:-1]
+        out.add(t)
+    return out
+
+
+LOADISH = re.compile(r'REX_LOAD|REX_RO_|REX_RAW_ADDR|REX_ADDR|REX_GUEST_CAS|\bbase\b')
+UNSAFE = re.compile(r'\(ctx, base[,)]|REX_CALL_INDIRECT_|REX_GUEST_CAS|ppc_trap\(|\breturn\b|\bswitch \(|setjmp|longjmp')
+IF_COND = re.compile(r'^\tif \((.*)\) goto loc_[0-9A-F]{8};$')
+
+
+def counter_only(body, at, end, lines, label_at):
+    """#226: the loop body[at..end] (lines: its statements) branches only on values it did not load."""
+    if any(UNSAFE.search(l) for l in lines):
+        return False
+    inner = {lab for lab, k in label_at.items() if at < k <= end}
+    for k, l in enumerate(body):
+        if at <= k <= end:
+            continue
+        if any(t in inner for t in GOTO.findall(l)):
+            return False  # entered from outside other than at the header
+    tainted = set()
+    changed = True
+    while changed:
+        changed = False
+        for l in lines:
+            if l.startswith('\tif ('):
+                continue  # a branch writes nothing
+            toks = tokens(l) - {'goto', 'if'}
+            if LOADISH.search(l) or toks & tainted:
+                new = toks - tainted
+                if new:
+                    tainted |= new
+                    changed = True
+    for l in lines:
+        m = IF_COND.match(l)
+        if m:
+            cond = m.group(1)
+            if LOADISH.search(cond) or tokens(cond) & tainted:
+                return False
+        elif l.startswith('\tif (') or ('goto' in l and not ONLY_GOTO.match(l)):
+            return False  # a form this cannot read
+    return True
+
+
 def needed_headers(body, headers):
     """Of the loop headers of one function (label -> line index in body), those that need a barrier."""
     label_at = {}
@@ -103,6 +167,9 @@ def needed_headers(body, headers):
         if not readable:
             need.add(header)
             continue
+        if COUNTED and counter_only(body, at, end, lines, label_at):
+            continue  # #226: it ends whatever memory says
+
         # Is there a way from the header back to it that passes no indirect call?
         seen = set()
         stack = [at]

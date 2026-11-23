@@ -73,6 +73,10 @@ struct StatsRanges {
   bool no_memory = false;
 };
 StatsRanges ReadStatsRanges();
+// sasrt-nx (2026-11-09, the user: "more memory improvements"): the range cache's least recently used entries dropped
+// until it holds no more than keep_bytes (0: all); the bytes freed. The title's memory governor calls it while the heap
+// is short (the cache is up to masseffect_io_ranges_mb of heap: 64 MB). A dropped range is read from the SD again.
+uint64_t TrimRangeCache(uint64_t keep_bytes);
 
 class HostPathFile : public File {
  public:

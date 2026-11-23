@@ -73,11 +73,14 @@ u32 AllocHeader(u32 size) {
   std::memset(host, 0, size);
   const u32 va = REX_KERNEL_MEMORY()->HostToGuestVirtual(host);
   std::lock_guard lock(g_owned_mutex);
-  g_owned_headers.insert(va);
+  if (g_owned_headers.insert(va).second)
+    records::MarkOwned(va, true);  // rr6-nx (2026-11-08, rr6_records_lockfree)
   return va;
 }
 
 bool OwnsHeader(u32 va) {
+  if (const int fast = records::OwnedFast(va); fast >= 0)  // rr6-nx (2026-11-08, rr6_records_lockfree)
+    return fast != 0;
   std::lock_guard lock(g_owned_mutex);
   return g_owned_headers.count(va) != 0;
 }
@@ -87,6 +90,7 @@ void FreeHeader(u32 va) {
     std::lock_guard lock(g_owned_mutex);
     if (!g_owned_headers.erase(va))
       return;
+    records::MarkOwned(va, false);  // rr6-nx (2026-11-08, rr6_records_lockfree)
   }
   records::FreeRaw(GuestPtr<void>(va));
 }
@@ -638,6 +642,16 @@ u32 LockResource(u32 resource, u32 mip_lock, u32 base_address, u32 mip_address, 
   if (!r)
     return address;
   const u32 common = r[0];
+  // katamari-nx (2026-10-30): does Beautiful Katamari read a texture on the CPU (a resolve result, which Renut does not
+  // write back to guest memory: sasrt-nx's resolve readback)? The first 24 READ-ONLY texture / surface locks (flag
+  // 0x10, a CPU read), to compare with the resolve destinations of the trace (banjo_renut_diag_resolve_trace). The
+  // first version logged every lock: at load time they are all writes (flags 0, the textures' uploads).
+  if (((common & 0xF) == 3 || (common & 0xF) == 4) && (flags & 0x10)) {
+    static std::atomic<uint32_t> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 24)
+      RGPU_INFO("[katamari] texture lock: resource {:08X} type {} address {:08X} size {} flags {:X}", resource,
+                common & 0xF, address, size, flags);
+  }
   u32 fenced = resource;
   if ((common & 0xF) == 4 && (common & 0x40000000u) && u32(r[6]))
     fenced = r[6];  // a texture level: its texture
@@ -898,6 +912,7 @@ void D3DResource_Destroy_hook(u32 resource) {
       ReleaseHostTextureLocked(resource);
       ReleaseGuestShaderLocked(resource);
     });
+    ForgetInPlaceShader(resource);  // blur-nx (2026-11-13, #13's fix): after the item above is queued
     DestroyGuestResource(resource);
     return;
   }

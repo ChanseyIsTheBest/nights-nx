@@ -16,6 +16,10 @@
 
 #include "renut_engine/gpu/d3d/d3d_native.h"
 #include "renut_engine/gpu/guest/guest_memory.h"
+#include "renut_engine/gpu/banjo_renut_tuning.h"  // blur-nx (2026-11-10, port 76; its key 213): OcclusionQueriesOn
+#include "renut_engine/gpu/log.h"
+#include "renut_engine/gpu/render/surfaces.h"  // blur-nx (2026-11-10, port 76; its key 215): NoteSurfaceHeader
+#include <algorithm>
 
 using namespace renut::gpu;
 
@@ -228,11 +232,13 @@ void D3D_SetSurfaceClip_hook(u32 /*device*/, u32, u32, u32, u32) {}
 
 // void D3DDevice_SetRenderTarget(D3DDevice*, DWORD Index, D3DSurface*) [0x8227AB68]
 void D3DDevice_SetRenderTarget_hook(u32 device, u32 index, u32 surface) {
+  NoteSurfaceHeader(surface);  // blur-nx (2026-11-10, port 76; its key 215: blur_renut_stack_surface_headers)
   native::SetRenderTarget(native::DeviceAt(device), index, surface);
 }
 
 // void D3DDevice_SetDepthStencilSurface(D3DDevice*, D3DSurface*) [0x8227AF40]
 void D3DDevice_SetDepthStencilSurface_hook(u32 device, u32 surface) {
+  NoteSurfaceHeader(surface);  // blur-nx (2026-11-10, port 76; its key 215: blur_renut_stack_surface_headers)
   native::SetDepthStencilSurface(native::DeviceAt(device), surface);
 }
 
@@ -295,6 +301,83 @@ void D3DDevice_BlockUntilIdle_hook(u32 device) {
 }
 
 } // namespace
+
+// blur-nx (2026-11-10/11, port 76; its key 213: blur_renut_occlusion_queries): D3DQuery_GetData's answer. Renut runs no
+// GPU packets, so the counts an occlusion query waits for never come: under Renut, Issue(END) leaves the sample blocks
+// as they were (zeros, then whatever the memory held) and GetData said "not ready" to every query for ever, so whatever
+// a game hides by a query was never drawn (Blur's light glows, the tail lights' red glow). AnswerOcclusionQuery, called
+// before the game's own GetData runs, writes into every block of an issued occlusion query what the reference's GPU
+// writes at the ZPASS event (the SDK's command_processor.cpp, ExecutePacketType3_EVENT_WRITE_ZPD): the block zeroed,
+// Total_A and ZPass_A = 1000 samples passed (little-endian, as the GPU writes them), and clears the issue's fence word,
+// which GetData compares with the GPU's read pointer: the counts are in.
+// The query object as XDK 2.0.11164's GetData reads it (blur-nx, sub_8224CD70; D3DQuery_Issue is sub_8224CAE8, the two
+// functions holding the 0xFFFFFEED sentinel): type 9 (occlusion) at +4, issued (bit 0x40) in the byte at +20, the fence
+// at +24, up to 30 sample-block pointers from +28 and their number at +148, 64-byte blocks (END counts at +0, BEGIN at
+// +32). A game at another XDK checks its own GetData against this before it registers it.
+// Not hooked in the base: Beautiful Katamari's XDK 2.0.5632 image links no D3DQuery_Issue / GetData (no instruction or
+// data word of it holds 0xFFFFFEED). A game whose image has GetData adds RENUT_D3DQUERY_GETDATA_HOOK(sub_<address>) to
+// the hook list below (or calls AnswerOcclusionQuery from a GetData hook of its own), and runs post-codegen again
+// (tools/post_codegen.py: direct_calls.py --redo) so GetData's callers go through the hooked entry.
+namespace renut::gpu::native {
+namespace {
+constexpr u32 kQueryFakeSamples = 1000;  // the SDK's query_occlusion_fake_sample_count
+u32 QueryBe(const u8 *p) { return u32(p[0]) << 24 | u32(p[1]) << 16 | u32(p[2]) << 8 | u32(p[3]); }
+void QueryLe(u8 *p, u32 v) {
+  p[0] = u8(v);
+  p[1] = u8(v >> 8);
+  p[2] = u8(v >> 16);
+  p[3] = u8(v >> 24);
+}
+}  // namespace
+
+// blur-nx (2026-11-11, port 76; its key 213): a query block's physical address as the game's GetData forms it from a
+// pointer at query +28: (p & 0x1FFFFFFF) + (((p >> 20) + 0x200) & 0x1000), read through the 0xC0000000 mapping. A
+// pointer in the 0xE0000000 range (Blur's blocks: E6D8DFC0) is a page further on (the console's 4 KB offset of that
+// range). Answers written at the pointer's own page were never read: GetData read the sentinel there and said not ready.
+u32 QueryBlockPhysical(u32 p) { return (p & 0x1FFFFFFFu) + ((((p >> 20) + 0x200u) & 0x1000u)); }
+
+bool AnswerOcclusionQuery(u32 query) {
+  if (!banjo::renut_gpu::OcclusionQueriesOn())
+    return false;
+  u8 *q = GuestPtr<u8>(query);
+  if (!q || QueryBe(q + 4) != 9 || !(q[20] & 0x40))
+    return false;
+  const u32 blocks = std::min<u32>(QueryBe(q + 148), 30);
+  bool answered = false;
+  for (u32 i = 0; i < blocks; ++i) {
+    const u32 pointer = QueryBe(q + 28 + 4 * i);
+    if (!pointer)
+      continue;
+    // Every issued query, not only blocks holding the sentinel (under Renut they hold zeros or leftover memory): the
+    // reference's answer for every query is 1000 passed.
+    u8 *block = GuestPhysicalPtr<u8>(QueryBlockPhysical(pointer));
+    std::memset(block, 0, 64);
+    QueryLe(block + 0, kQueryFakeSamples);   // Total_A
+    QueryLe(block + 16, kQueryFakeSamples);  // ZPass_A
+    answered = true;
+  }
+  if (answered) {
+    std::memset(q + 24, 0, 4);
+    static uint32_t logged = 0;
+    if (logged++ < 4)
+      RGPU_INFO("[renut] occlusion query {:08X}: {} block(s) answered with {} samples passed, as the reference's GPU "
+                "does (blur_renut_occlusion_queries)", query, blocks, kQueryFakeSamples);
+  }
+  return answered;
+}
+}  // namespace renut::gpu::native
+
+// blur-nx (2026-11-10/11, port 76; its key 213): D3DQuery_GetData(query, data, size, flags) at the game's own address:
+// the answer above, then the game's GetData (its __imp__), whose result the game gets. Under the emulated renderer the
+// game's GetData alone (BANJO_RENUT_HOOK). One line in the hook list: RENUT_D3DQUERY_GETDATA_HOOK(sub_8224CD70);
+// (blur-nx's address; the base registers none, see AnswerOcclusionQuery).
+#define RENUT_D3DQUERY_GETDATA_HOOK(subroutine)                                                                   \
+  REX_IMPORT(__imp__##subroutine, renut_query_get_data_original_##subroutine, u32(u32, u32, u32, u32));          \
+  static u32 renut_query_get_data_##subroutine(u32 query, u32 data, u32 size, u32 flags) {                        \
+    ::renut::gpu::native::AnswerOcclusionQuery(query);                                                            \
+    return renut_query_get_data_original_##subroutine(query, data, size, flags);                                  \
+  }                                                                                                               \
+  BANJO_RENUT_HOOK(subroutine, renut_query_get_data_##subroutine)
 
 // Render states, by their index in N&B's table (off_82E506F0).
 BANJO_RENUT_HOOK(sub_8233BC18, SetRenderStateHook<10>);  // D3DDevice_SetRenderState_ZEnable  // N&B sub_8264C140

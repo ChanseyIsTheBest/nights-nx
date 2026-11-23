@@ -19,6 +19,9 @@
 #include <unistd.h>  // banjo-nx (2026-10-28): sbrk (the heap's room, O(1))
 extern "C" size_t __nx_heap_size;  // libnx; the SDK's runtime_switch.cpp sets it
 extern "C" char *fake_heap_start, *fake_heap_end;  // libnx: the malloc heap's bounds
+// banjo-nx (2026-11-01): the guest memory core (sdk guest_memory_switch.cpp): the backing committed from the heap.
+extern "C" size_t RexGmCommittedBytes(void);
+extern "C" size_t RexGmChunkCount(void);
 #endif
 
 #include <rex/cvar.h>
@@ -35,6 +38,12 @@ extern "C" char *fake_heap_start, *fake_heap_end;  // libnx: the malloc heap's b
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>  // banjo-nx (2026-10-28, h10): the GPU region's figures
 #endif
+#include <rex/filesystem/devices/host_path_file.h>  // sasrt-nx (2026-11-09 night; port 58): the range cache's bytes
+#if defined(__SWITCH__)
+#include <threading_switch.h>  // sasrt-nx (2026-11-09 night; port 58): RexSwitchStackFigures
+#include <guest_memory_switch.h>  // sasrt-nx (2026-11-09 night; port 58): RexGmDecommitFigures
+#endif
+REXCVAR_DECLARE(int32_t, switch_guest_stack_mb);  // sasrt-nx (2026-11-09 night; port 58): sdk system/xthread.cpp
 
 REXCVAR_DEFINE_DOUBLE(renut_memory_report, 30.0, "Nuts&Bolts/Debug",
                       "Seconds between memory reports in the log (process, GPU and the "
@@ -170,9 +179,42 @@ void MaybeReportMemory() {
                 "ranges (largest {:.0f} MB); grown {} times, {} times given back ({:.0f} MB), {} blocks not placed in it",
                 Mb(r.size), r.blocks, Mb(r.used), Mb(r.peak), Mb(r.freeBytes), r.freeRanges, Mb(r.largestFree),
                 r.growths, r.givebacks, Mb(r.givenBack), r.refused);
+    // sasrt-nx (2026-11-11, sasrt_target_block_cache_mb)
+    plume::Deko3DTargetCacheInfo c;
+    plume::Deko3DTargetCacheFigures(c);
+    RGPU_INFO("Memory: kept target blocks {} ({:.0f} MB); so far {} targets took one, {} made a new one, {} kept, {} "
+              "dropped over the cap, {} given back (sasrt_target_block_cache_mb)",
+              c.blocks, Mb(c.bytes), c.hits, c.misses, c.kept, c.evicted, c.released);
+  }
+  // banjo-nx (2026-11-01, the console's out-of-memory crash): the heap's biggest users that the lines above do not
+  // name: the game's own memory (its committed backing), and deko3d's shader objects with the GLSL they hold (unpacked
+  // on demand now: plume::Deko3DGlslSource) and its pipeline objects.
+  {
+    uint64_t shaders = 0, glsl = 0;
+    plume::Deko3DShaderMemory(shaders, glsl);
+    RGPU_INFO("Memory: heap users: guest memory {:.0f} MB committed in {} chunks; deko3d {} shader objects, {:.1f} MB "
+              "of GLSL alive, {} graphics pipeline objects",
+              Mb(RexGmCommittedBytes()), RexGmChunkCount(), shaders, Mb(glsl), plume::Deko3DPipelineCount());
   }
 #endif
 #endif
+  // sasrt-nx (2026-11-09 night; port 58): the CPU side's known holders (the command buffers are in the GPU line).
+  {
+    size_t live = 0, kept = 0, kept_bytes = 0;
+#if defined(__SWITCH__)
+    RexSwitchStackFigures(&live, &kept, &kept_bytes);
+#endif
+    const rex::filesystem::StatsRanges ranges = rex::filesystem::ReadStatsRanges();
+    const uint64_t stack_mb = uint64_t(REXCVAR_GET(switch_guest_stack_mb));
+    RGPU_INFO("Memory: CPU: guest thread stacks {} in use x {} MB ({} MB) + {} kept ({:.0f} MB); I/O range cache {:.0f} "
+              "MB", live, stack_mb, uint64_t(live) * stack_mb, kept, Mb(kept_bytes), Mb(ranges.bytes_live));
+#if defined(__SWITCH__)
+    size_t committed = 0, chunks = 0, asked = 0, freed = 0;
+    RexGmDecommitFigures(&committed, &chunks, &asked, &freed);
+    RGPU_INFO("Memory: guest: {:.0f} MB committed in {} chunks; decommits asked for {:.0f} MB and freed {:.0f} MB (a "
+              "chunk goes only when a decommit covers all of it)", Mb(committed), chunks, Mb(asked), Mb(freed));
+#endif
+  }
   RGPU_INFO("Memory: GPU: {} render targets {:.0f} MB (x{:.3g} scale), {} textures {:.0f} MB (of "
             "which {} resolve targets {:.0f} MB), memexport {:.0f} MB",
             targets, Mb(target_bytes), ResolutionScale().Factor(), textures.textures, Mb(textures.bytes),

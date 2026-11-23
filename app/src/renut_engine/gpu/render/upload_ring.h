@@ -25,7 +25,7 @@ namespace renut::gpu {
 // banjo-nx (2026-10-18): 256 registers and a zero register after them (tools/deko3d_glsl_opt.py, pass bonerow: a
 // relative read clamped to 256 reads zeros instead of selecting them).
 constexpr uint32_t kFloatConstantsUboBytes = 256 * 16 + 16;
-constexpr uint32_t kSharedConstantsUboBytes = 1360;  // sizeof(SharedConstants), render/draw.cpp (2026-10-19: + pixel origin)
+constexpr uint32_t kSharedConstantsUboBytes = 1552;  // sizeof(SharedConstants), render/draw.cpp (2026-10-19: + pixel origin; halo3-nx: + loop constants)
 
 struct UploadAllocation {
   plume::RenderBufferReference ref;  // buffer + offset, for copies / views
@@ -45,6 +45,8 @@ public:
   // for the two rings, the heap at 2.9 of 3.08 GB in the d4 city); a city frame fills a few MB with the constants
   // pushed. A frame that needs more adds a chunk, which the trim below gives back.
   static constexpr uint64_t kChunkSize = 16ull << 20;
+  // kameo-nx (2026-11-04, banjo_renut_split_frame_mb): the chunk this frame is writing, so how far it has got.
+  size_t CurrentChunk() const { return current_; }
   // Resets (frames of this slot) after which chunks beyond what those frames
   // used are released.
   static constexpr uint32_t kTrimResets = 300;
